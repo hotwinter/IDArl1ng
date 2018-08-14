@@ -83,3 +83,9 @@ Thanks to Quarkslab for allowing this release.
 
 * Alexandre Adamski <<neat@idarling.re>>
 * Joffrey Guilbon <<patate@idarling.re>>
+
+# NOTES
+
+[how-to-pull-request-a-specific-commit](https://stackoverflow.com/questions/34027850/how-to-pull-request-a-specific-commit)
+
+Add authorization.
