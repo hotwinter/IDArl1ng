@@ -10,8 +10,14 @@
 
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
-from idarling import server
+import argparse
+import logging
+import os
+import signal
+import sys
+import traceback
 
+from PyQt5.QtCore import QCoreApplication, QTimer
 
 from idarling.shared.server import Server
 
@@ -43,7 +49,7 @@ class DedicatedServer(Server):
         logPath = os.path.join(logDir, 'idarling.%s.log' % os.getpid())
 
         # Configure the logger
-        # logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
         logFormat = '[%(asctime)s][%(levelname)s] %(message)s'
         formatter = logging.Formatter(fmt=logFormat, datefmt='%H:%M:%S')
 
@@ -60,7 +66,7 @@ class DedicatedServer(Server):
         return logger
 
 
-def main(args):
+def start(args):
     """
     The entry point of a Python program.
     """
@@ -87,7 +93,7 @@ def main(args):
     return app.exec_()
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--help', action='help',
                         help='show this help message and exit')
@@ -104,4 +110,4 @@ if __name__ == '__main__':
     security.add_argument('--no-ssl', action='store_true',
                           help='disable SSL (not recommended)')
 
-    main(parser.parse_args())
+    start(parser.parse_args())
