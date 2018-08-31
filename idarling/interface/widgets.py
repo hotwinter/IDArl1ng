@@ -12,7 +12,6 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 import logging
 
-from functools import partial
 from PyQt5.QtCore import Qt, QSize, QPoint, QRect
 from PyQt5.QtGui import QPixmap, QIcon, QPainter, QRegion
 from PyQt5.QtWidgets import QWidget, QLabel, QMenu, QAction, QActionGroup
@@ -120,15 +119,9 @@ class StatusWidget(QWidget):
         iconPath = self._plugin.resource('settings.png')
         settings.setIcon(QIcon(iconPath))
 
-        def dialog_accepted(dialog):
-            name, color, notifications, navbarColorizer = dialog.get_result()
-
         # Add a handler on the action
         def settingsActionTriggered():
-            dialog = SettingsDialog(self._plugin)
-            dialog.accepted.connect(partial(dialog_accepted, dialog))
-            dialog.exec_()
-
+            SettingsDialog(self._plugin).exec_()
         settings.triggered.connect(settingsActionTriggered)
         menu.addAction(settings)
 
@@ -145,21 +138,11 @@ class StatusWidget(QWidget):
         integrated.triggered.connect(integratedActionTriggered)
         menu.addAction(integrated)
 
-        # Add each of the servers
-        if self._plugin.core.servers:
-            menu.addSeparator()
-            serverGroup = QActionGroup(self)
+        def create_servers_group(servers):
+            serversGroup = QActionGroup(self)
             currentServer = self._plugin.network.server
 
-            def serverActionTriggered(serverAction):
-                isConnected = self._plugin.network.connected \
-                    and server["host"] == currentServer["host"] \
-                    and server["port"] == currentServer["port"]
-                self._plugin.network.stop_server()
-                if not isConnected:
-                    self._plugin.network.connect(serverAction._server)
-
-            for server in self._plugin.core.servers:
+            for server in servers:
                 isConnected = self._plugin.network.connected \
                               and server["host"] == currentServer["host"] \
                               and server["port"] == currentServer["port"]
@@ -168,10 +151,34 @@ class StatusWidget(QWidget):
                 serverAction._server = server
                 serverAction.setCheckable(True)
                 serverAction.setChecked(isConnected)
-                serverGroup.addAction(serverAction)
+                serversGroup.addAction(serverAction)
 
-            menu.addActions(serverGroup.actions())
-            serverGroup.triggered.connect(serverActionTriggered)
+            def serverActionTriggered(serverAction):
+                wasConnected = self._plugin.network.connected \
+                    and self._plugin.network.server == server
+                self._plugin.network.stop_server()
+                self._plugin.network.disconnect()
+                if not wasConnected:
+                    self._plugin.network.connect(serverAction._server)
+            serversGroup.triggered.connect(serverActionTriggered)
+            return serversGroup
+
+        # Add the discovered servers
+        servers = self._plugin.network.discovery.servers
+        if self._plugin.network.server_running() \
+                and self._plugin.network.server in servers:
+            servers.remove(self._plugin.network.server)
+        if servers:
+            menu.addSeparator()
+            serversGroup = create_servers_group(servers)
+            menu.addActions(serversGroup.actions())
+
+        # Add the configured servers
+        servers = self._plugin.config["servers"]
+        if self._plugin.config["servers"]:
+            menu.addSeparator()
+            serversGroup = create_servers_group(servers)
+            menu.addActions(serversGroup.actions())
 
         # Show the context menu
         menu.exec_(self.mapToGlobal(point))

@@ -140,7 +140,7 @@ class IDBHooks(Hooks, ida_idp.IDB_Hooks):
                                     type_name))
             else:
                 local_types.append(None)
-        sent_types = []
+
         if self.last_local_type is None:
             self.last_local_type = local_types
             sent_types = local_types
@@ -434,10 +434,10 @@ class IDPHooks(Hooks, ida_idp.IDP_Hooks):
 
     def ev_undefine(self, ea):
         self._send_event(UndefinedEvent(ea))
-        return 0
+        return ida_idp.IDP_Hooks.ev_undefine(self, ea)
 
-    def ev_adjust_argloc(self, *_):
-        return 0
+    def ev_adjust_argloc(self, *args):
+        return ida_idp.IDP_Hooks.ev_adjust_argloc(self, *args)
 
 
 class HexRaysHooks(Hooks):
@@ -479,6 +479,9 @@ class HexRaysHooks(Hooks):
         if event == ida_hexrays.hxe_func_printed:
             ea = ida_kernwin.get_screen_ea()
             func = ida_funcs.get_func(ea)
+            if func is None:
+                return
+
             if self._funcEA != func.startEA:
                 self._funcEA = func.startEA
                 self._labels = HexRaysHooks._get_user_labels(self._funcEA)
@@ -684,7 +687,11 @@ class ViewHooks(Hooks, ida_kernwin.View_Hooks):
 
     def view_loc_changed(self, view, now, was):
         if now.plce.toea() != was.plce.toea():
-            self._plugin.network.send_packet(UpdateCursors(now.plce.toea()))
+            name = self._plugin.config["user"]["name"]
+            color = self._plugin.config["user"]["color"]
+            self._plugin.network.send_packet(UpdateCursors(name,
+                                                           now.plce.toea(),
+                                                           color))
 
 
 class UIHooks(Hooks, ida_kernwin.UI_Hooks):
@@ -699,22 +706,15 @@ class UIHooks(Hooks, ida_kernwin.UI_Hooks):
         self._lock = False
 
     def get_ea_hint(self, ea):
-        # TODO change IDArling team by username in the next commit
         if self._plugin.network.connected:
-            nbytes = self._plugin.interface.painter.nbytes
             painter = self._plugin.interface.painter
-            for infos in painter.users_positions.values():
+            nbytes = painter.nbytes
+            for name, infos in painter.users_positions.items():
                 address = infos['address']
                 if address - nbytes * 4 <= ea <= address + nbytes * 4:
-                    return "IDArling team"
+                    return str(name)
 
     def saving(self):
-        # clean users cursor
-        # saving and saved hook are triggered two times...
-        # This problem seems to be more general than that, we can see that the
-        # init of the plugin is called twice ... Maybe it's a problem coming
-        # from me. We need to figured it out. This bug was reproduced on IDA
-        # 7.0 on windows and IDA 7.1 on Linux
         if not self._lock:
             painter = self._plugin.interface.painter
             users_positions = painter.users_positions
