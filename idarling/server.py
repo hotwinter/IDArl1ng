@@ -27,18 +27,9 @@ class DedicatedServer(Server):
     The dedicated server implementation.
     """
 
-    def __init__(self, ssl, parent=None):
-        logger = self.start_logging()
-        Server.__init__(self, logger, ssl, parent)
-
-    def local_file(self, filename):
-        filesDir = os.path.join(os.path.dirname(__file__), 'files')
-        filesDir = os.path.abspath(filesDir)
-        if not os.path.exists(filesDir):
-            os.makedirs(filesDir)
-        return os.path.join(filesDir, filename)
-
-    def start_logging(self):
+    @staticmethod
+    def start_logging():
+        Server.add_trace_level()
         logger = logging.getLogger('IDArling.Server')
 
         # Get path to the log file
@@ -49,7 +40,6 @@ class DedicatedServer(Server):
         logPath = os.path.join(logDir, 'idarling.%s.log' % os.getpid())
 
         # Configure the logger
-        logger.setLevel(logging.DEBUG)
         logFormat = '[%(asctime)s][%(levelname)s] %(message)s'
         formatter = logging.Formatter(fmt=logFormat, datefmt='%H:%M:%S')
 
@@ -65,6 +55,18 @@ class DedicatedServer(Server):
 
         return logger
 
+    def __init__(self, ssl, level, parent=None):
+        logger = DedicatedServer.start_logging()
+        logger.setLevel(getattr(logging, level))
+        Server.__init__(self, logger, ssl, parent)
+
+    def local_file(self, filename):
+        filesDir = os.path.join(os.path.dirname(__file__), 'files')
+        filesDir = os.path.abspath(filesDir)
+        if not os.path.exists(filesDir):
+            os.makedirs(filesDir)
+        return os.path.join(filesDir, filename)
+
 
 def start(args):
     """
@@ -73,11 +75,11 @@ def start(args):
     app = QCoreApplication(sys.argv)
     sys.excepthook = traceback.print_exception
 
-    server = DedicatedServer(args.ssl)
+    server = DedicatedServer(args.ssl, args.level)
     server.start(args.host, args.port)
 
     # Allow the use of Ctrl-C to stop the server
-    def sigint_handler(signum, frame):
+    def sigint_handler(_, __):
         server.stop()
         app.exit(0)
     signal.signal(signal.SIGINT, sigint_handler)
@@ -109,5 +111,9 @@ def main():
                           help='the certificate and private key files')
     security.add_argument('--no-ssl', action='store_true',
                           help='disable SSL (not recommended)')
+
+    levels = ["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "TRACE"]
+    parser.add_argument('-l', '--level', type=str, choices=levels,
+                        default="INFO", help='the log level')
 
     start(parser.parse_args())

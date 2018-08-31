@@ -12,17 +12,16 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 import collections
 import colorsys
-import functools
 import logging
 import random
+import struct
 
 import ida_funcs
 import ida_idaapi
 import ida_kernwin
 import ida_nalt
+import ida_registry
 import idautils
-
-from ..utilities.ida import get_ida_bg_color
 
 logger = logging.getLogger('IDArling.Painter')
 
@@ -34,24 +33,21 @@ class Painter(object):
     https://github.com/gaasedelen/lighthouse/blob/master/plugin/lighthouse/painting.py
     """
 
-    def __init__(self):
+    @staticmethod
+    def get_ida_bg_color():
+        palette = ida_registry.reg_read_binary("Palette")
+        if palette is None:
+            return 0xffffff
+        selected = struct.unpack("<I", palette[8:12])[0]
+        index = 176 + selected * 208
+        return struct.unpack("<I", palette[index:index + 4])[0]
+
+    def __init__(self, plugin):
         """
         Initialize the painter module.
         """
         super(Painter, self).__init__()
-
-        # ---------------------------------------------------------------------
-        # Current user parameters
-        # ---------------------------------------------------------------------
-
-        # User name
-        self.name = None
-        # Choose a random color for the current user
-        r, g, b = colorsys.hls_to_rgb(random.random(), 0.5, 1.0)
-        self._color = int(r * 255) << 16 | int(g * 255) << 8 | int(b * 255)
-        # User's parameters for navbar and notifications
-        self.noNavbarColorizer = False
-        self.noNotifications = False
+        self._plugin = plugin
 
         # ---------------------------------------------------------------------
         # Painted State
@@ -69,6 +65,10 @@ class Painter(object):
         #
         self._painted_functions = collections.defaultdict(collections.deque)
 
+        #
+        # self._users_positions:
+        #   collections.defaultdict({name: {color: int, address: int}}
+        #
         self._users_positions = collections.defaultdict(dict)
 
         self.DEFCOLOR = 0xFFFFFFFF
@@ -83,8 +83,8 @@ class Painter(object):
         """
         class UIHooks(ida_kernwin.UI_Hooks):
             def __init__(self, painter):
-                self._painter = painter
                 ida_kernwin.UI_Hooks.__init__(self)
+                self._painter = painter
 
             def ready_to_run(self, *_):
                 """
@@ -96,13 +96,27 @@ class Painter(object):
                 # get default background and original navbar colorizer
                 #
 
-                self._painter.bg_color = get_ida_bg_color()
                 colorizer = self._painter.custom_nav_colorizer
                 ida_nav_colorizer = ida_kernwin.set_nav_colorizer(colorizer)
-                self._painter.ida_nav_colorizer = ida_nav_colorizer
+                if ida_nav_colorizer is not None:
+                    self._painter.ida_nav_colorizer = ida_nav_colorizer
+                self._painter.bg_color = Painter.get_ida_bg_color()
 
         self._uiHooks = UIHooks(self)
         result = self._uiHooks.hook()
+
+        # ---------------------------------------------------------------------
+        # Current user parameters
+        # ---------------------------------------------------------------------
+
+        # Choose a random color for the current user if it's not user-defined
+
+        if self._plugin.config["user"]["color"] == -1:
+            r, g, b = colorsys.hls_to_rgb(random.random(), 0.5, 1.0)
+            color = int(b * 255) << 16 | int(g * 255) << 8 | int(r * 255)
+            self._plugin.config["user"]["color"] = color
+            self._plugin.save_config()
+
         if not result:
             raise RuntimeError("Failed to install painter")
 
@@ -123,22 +137,23 @@ class Painter(object):
         logger.debug("Uninstalled the painter")
         return True
 
-    def paint(self, color, address):
+    def paint(self, name, color, address):
         """
         Request database painting
 
+        :param name: the user's name
         :param color: the color to paint
         :param address: the address where apply the color
         """
-        self.paint_database(color, address)
+        self.paint_database(name, color, address)
 
-    def unpaint(self, color):
+    def unpaint(self, name):
         """
         Request database unpainting
 
-        :param color: the color to unpaint
+        :param name: the user to remove
         """
-        self.unpaint_database(color)
+        self.unpaint_database(name)
 
     # -------------------------------------------------------------------------
     # Painter - Navbar colorizer
@@ -154,55 +169,60 @@ class Painter(object):
         # there is a bug in IDA, with huge segment number, all the navbar takes
         # the color provided by the user, this will be resolved in IDA 7.2
         #
-        if not self.noNavbarColorizer:
-            for color, infos in self.users_positions.items():
+        if self._plugin.config["user"]["navbar_colorizer"]:
+            for infos in self._users_positions.values():
                 if ea - nbytes * 2 <= infos['address'] <= ea + nbytes * 2:
-                    return long(color)
+                    return long(infos['color'])
                 if ea - nbytes * 4 <= infos['address'] <= ea + nbytes * 4:
                     return long(0)
         orig = ida_kernwin.call_nav_colorizer(self.ida_nav_colorizer, ea,
                                               nbytes)
-
+        self.nbytes = nbytes
         return long(orig)
 
     def paint_navbar(self):
+        """
+        Request a repainting for the navbar
+        """
         ida_kernwin.refresh_navband(True)
 
     # -------------------------------------------------------------------------
     # Painter - Instructions / Items
     # -------------------------------------------------------------------------
 
-    def paint_instruction(self, color, address):
+    def paint_instruction(self, name, color, address):
         """
         Paint instructions with the given color
 
         :param color: the color
+        :param name: the user name
         :param address: the address where apply the color
         """
         # get current color
         current_color = self.get_paint_instruction(address)
         # store current color to color stack
         self._painted_instructions[address].append(current_color)
-        # update current user position
-        self.users_positions[color]['address'] = address
+        # update current user position and name
+        self.users_positions[name]["address"] = address
+        self.users_positions[name]["color"] = color
         # apply the user color
         self.set_paint_instruction(address, color)
 
-    def clear_instruction(self, color):
+    def clear_instruction(self, name):
         """
         Clear paint from the given instruction
 
-        :param color: the color
+        :param name: the name
         """
         # get user position
-        users_positions = self.users_positions.get(color)
+        users_positions = self.users_positions.get(name)
         if users_positions:
             address = users_positions['address']
             # if a color has been applied, restore it
             try:
                 color = self._painted_instructions[address].pop()
             # else apply the default background
-            except Exception as e:
+            except IndexError:
                 color = self.bg_color
             self.set_paint_instruction(address, color)
 
@@ -227,10 +247,11 @@ class Painter(object):
     # Painter - Functions
     # -------------------------------------------------------------------------
 
-    def paint_function(self, color, new_address):
+    def paint_function(self, name, color, new_address):
         """
         Paint function with the given color
 
+        :param name: the name
         :param color: the color
         :param new_address: address within the function where apply the color
         """
@@ -242,7 +263,7 @@ class Painter(object):
         new_func = ida_funcs.get_func(new_address)
 
         # get the previous user position
-        user_position = self.users_positions.get(color)
+        user_position = self.users_positions.get(name)
         if user_position:
             address = user_position['address']
             func = ida_funcs.get_func(address)
@@ -255,21 +276,20 @@ class Painter(object):
             # finaly paint the function
             self.set_paint_function(new_func, color)
 
-    def clear_function(self, color, new_address):
+    def clear_function(self, name, new_address):
         """
         Clear paint from the given functions
 
-        :param color: the color
+        :param name: the name
         :param new_address: an address within the function where the color
                             needs to be cleared
         """
-        user_position = self.users_positions.get(color)
+        user_position = self.users_positions.get(name)
         new_func = ida_funcs.get_func(new_address)
 
         #
         # if the deqeue is empty, this is the first time we meet this function
         # we must save the original color to restore it
-        # TODO: broadcast the original color to others users
         #
         if new_func and not self._painted_functions[new_func.startEA]:
             self._painted_functions[new_func.startEA].append(new_func.color)
@@ -302,12 +322,6 @@ class Painter(object):
                 # user-defined color
                 if color == self.DEFCOLOR:
                     self.set_paint_instruction(ea, self.bg_color)
-                else:
-                    #
-                    # TODO: IDA doesn't provide a way to hook painting, with
-                    # this we can propagate user-defined colors between users.
-                    #
-                    pass
 
     def clear_function_instructions(self, address):
         """
@@ -336,33 +350,34 @@ class Painter(object):
     # Painter
     # -------------------------------------------------------------------------
 
-    def paint_database(self, color, address):
+    def paint_database(self, name, color, address):
         """
         Update database's paint state with the given color and address
 
+        :param name: the name
         :param color: the color
         :param address: the address
         """
         # clear instructions
-        self.clear_instruction(color)
+        self.clear_instruction(name)
         # clear functions
-        self.clear_function(color, address)
+        self.clear_function(name, address)
         # paint functions
-        self.paint_function(color, address)
+        self.paint_function(name, color, address)
         # paint instructions
-        self.paint_instruction(color, address)
+        self.paint_instruction(name, color, address)
         # paint navbar
         self.paint_navbar()
 
-    def unpaint_database(self, color):
+    def unpaint_database(self, name):
         """
-        Clear paint associated with the given color and update state
+        Clear paint associated with the given name and update state
 
-        :param color: the color
+        :param name: the name
         """
         # clear instructions
-        self.clear_instruction(color)
-        self.clear_function(color, ida_idaapi.BADADDR)
+        self.clear_instruction(name)
+        self.clear_function(name, ida_idaapi.BADADDR)
 
     #
     # methods used by saving and saved hooks
@@ -395,6 +410,50 @@ class Painter(object):
         if func:
             self.set_paint_function(func, color)
 
+    #
+    # methods used by user_color_changed user_renamed events handlers
+    #
+    def rename_user(self, old_name, new_name):
+        """
+        Rename an user.
+
+        :param old_name: the previous name
+        :param new_name: the new name
+        """
+        self._users_positions[new_name] = self._users_positions.pop(old_name)
+
+    def change_user_color(self, name, old_color, new_color):
+        """
+        Change the color for the given user
+
+        :param name: the user name
+        :param old_color: the previous color
+        :param new_color: the new color
+        """
+        # Replace the color for the given user
+        self._users_positions[name]["color"] = new_color
+
+        # Replace the color in painted instructions for the given user
+        user_address = self._users_positions[name]["address"]
+        for n, e in enumerate(self._painted_instructions[user_address]):
+            if e == old_color:
+                self._painted_instructions[user_address][n] = new_color
+        # If the color is the current color instruction (not in the deque yet)
+        # repaint the given instrution with the new color
+        if new_color not in self._painted_instructions[user_address]:
+            self.set_paint_instruction(user_address, new_color)
+
+        # Replace the color in painted functions for the given user
+        func = ida_funcs.get_func(user_address)
+        if func:
+            for n, e in enumerate(self._painted_functions[func.start_ea]):
+                if e == old_color:
+                    self._painted_functions[func.start_ea][n] = new_color
+        # If the color is the current color function (not in the deque yet)
+        # repaint the given function with the new color
+        if new_color not in self._painted_functions[user_address]:
+            self.set_paint_function(func, new_color)
+
     # -------------------------------------------------------------------------
     # Misc
     # -------------------------------------------------------------------------
@@ -426,11 +485,19 @@ class Painter(object):
         """
         return self._nbytes
 
+    @nbytes.setter
+    def nbytes(self, nbytes):
+        """
+        Set nbytes.
+
+        :param nbytes: nbytes
+        """
+        self._nbytes = nbytes
+
     @property
     def users_positions(self):
         """
         Return the current users positions
-
         :return: the current users positions
         """
         return self._users_positions

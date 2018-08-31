@@ -125,25 +125,57 @@ class DownloadDatabase(ParentCommand):
 class Subscribe(DefaultCommand):
     __command__ = 'subscribe'
 
-    def __init__(self, repo, branch, tick, color):
+    def __init__(self, repo, branch, tick, name, color, ea):
         super(Subscribe, self).__init__()
         self.repo = repo
         self.branch = branch
         self.tick = tick
+        self.name = name
         self.color = color
+        self.ea = ea
 
 
 class Unsubscribe(DefaultCommand):
     __command__ = 'unsubscribe'
 
-    def __init__(self, color):
+    def __init__(self, name):
         super(Unsubscribe, self).__init__()
-        self.color = color
+        self.name = name
 
 
 class UpdateCursors(DefaultCommand):
     __command__ = 'update_cursors'
 
-    def __init__(self, ea):
+    def __init__(self, name, ea, color):
         super(UpdateCursors, self).__init__()
+        self.name = name
         self.ea = ea
+        self.color = color
+
+
+class UserRenamed(DefaultCommand):
+    __command__ = 'user_renamed'
+
+    def __init__(self, old_name, new_name):
+        super(UserRenamed, self).__init__()
+        self.old_name = old_name
+        self.new_name = new_name
+
+
+class UserColorChanged(DefaultCommand):
+    __command__ = 'user_color_changed'
+
+    def __init__(self, name, old_color, new_color):
+        super(UserColorChanged, self).__init__()
+        self.name = name
+        self.old_color = old_color
+        self.new_color = new_color
+
+
+class InviteTo(DefaultCommand):
+    __command__ = 'invite_to'
+
+    def __init__(self, name, loc):
+        super(InviteTo, self).__init__()
+        self.name = name
+        self.loc = loc

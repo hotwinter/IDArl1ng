@@ -347,7 +347,7 @@ class SaveActionHandler(ActionHandler):
         # Save the current database
         self._plugin.core.save_netnode()
         inputPath = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
-        ida_loader.save_database(inputPath, ida_loader.DBFL_KILL)
+        ida_loader.save_database(inputPath, 0)
 
         # Create the packet that will hold the database
         packet = UploadDatabase.Query(repo.name, branch.name)
@@ -388,8 +388,10 @@ class SaveActionHandler(ActionHandler):
         success.exec_()
 
         # Subscribe to the new events stream
-        color = self._plugin.interface.painter.color
+        color = self._plugin.config["user"]["color"]
+        name = self._plugin.config["user"]["name"]
+        ea = ida_kernwin.get_screen_ea()
         self._plugin.network.send_packet(Subscribe(repo.name, branch.name,
                                                    self._plugin.core.tick,
-                                                   color))
+                                                   color, name, ea))
         self._plugin.core.hook_all()

@@ -326,18 +326,19 @@ class LocalTypesChangedEvent(Event):
                 ida_typeinf.alloc_type_ordinals(None, missing_ord)
 
         for t in local_type:
-            logger.debug("Processing: %s", str(t))
-            alloc_oridinal(t[0])
-
-            # Can't change some local types if not delete them first
-            # Example: struct aaa{int a;}'
-            ida_typeinf.del_numbered_type(None, t[0])
-
             if t is not None:
+                logger.debug("Processing: %s", str(t))
+                alloc_oridinal(t[0])
+
+                # Can't change some local types if not delete them first
+                # Example: struct aaa{int a;}'
+                ida_typeinf.del_numbered_type(None, t[0])
+
                 cur_tinfo = ida_typeinf.tinfo_t()
                 cur_tinfo.deserialize(None, t[1], t[2])
                 logger.debug("set_numbered_type ret: %d",
                              cur_tinfo.set_numbered_type(None, t[0], 0, t[3]))
+                ida_typeinf.import_type(None, -1, t[-1])
 
         ida_kernwin.request_refresh(ida_kernwin.IWID_LOCTYPS)
 

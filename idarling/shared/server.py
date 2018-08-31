@@ -16,11 +16,12 @@ import socket
 import ssl
 
 from .database import Database
+from .discovery import ClientsDiscovery
 from .commands import (GetRepositories, GetBranches,
                        NewRepository, NewBranch,
                        UploadDatabase, DownloadDatabase,
-                       Subscribe, Unsubscribe,
-                       UpdateCursors)
+                       Subscribe, Unsubscribe, InviteTo,
+                       UpdateCursors, UserRenamed, UserColorChanged)
 from .packets import Command, Event
 from .sockets import ClientSocket, ServerSocket
 
@@ -34,6 +35,8 @@ class ServerClient(ClientSocket):
         ClientSocket.__init__(self, logger, parent)
         self._repo = None
         self._branch = None
+        self._color = None
+        self._name = None
         self._handlers = {}
 
     def connect(self, sock):
@@ -58,7 +61,10 @@ class ServerClient(ClientSocket):
             DownloadDatabase.Query: self._handle_download_database,
             Subscribe: self._handle_subscribe,
             Unsubscribe: self._handle_unsubscribe,
+            InviteTo: self._handle_invite_to,
             UpdateCursors: self._handle_update_cursors,
+            UserRenamed: self._handle_user_renamed,
+            UserColorChanged: self._handle_user_color_changed,
         }
 
     @property
@@ -160,9 +166,14 @@ class ServerClient(ClientSocket):
     def _handle_subscribe(self, packet):
         self._repo = packet.repo
         self._branch = packet.branch
+        self._name = packet.name
         self._color = packet.color
+        self._ea = packet.ea
         self.parent().register_client(self)
 
+        # Inform others people that we are subscribing
+        for client in self.parent().find_clients(self._should_forward):
+            client.send_packet(packet)
         # Send all missed events
         events = self.parent().database.select_events(self._repo, self._branch,
                                                       packet.tick)
@@ -177,13 +188,27 @@ class ServerClient(ClientSocket):
             client.send_packet(packet)
         self._repo = None
         self._branch = None
+        self._name = None
         self._color = None
 
-    def _handle_update_cursors(self, packet):
-        self._ea = packet.ea
-        packet.color = self._color
+    def _handle_invite_to(self, packet):
+        for client in self.parent().find_clients(self._should_forward):
+            if client._name == packet.name or packet.name == "everyone":
+                packet.name = self._name
+                client.send_packet(packet)
 
-        # Forward the event to the other clients
+    def _handle_update_cursors(self, packet):
+        for client in self.parent().find_clients(self._should_forward):
+            client.send_packet(packet)
+
+    def _handle_user_renamed(self, packet):
+        # TODO:
+        # Check if the new_name is already used
+        self._name = packet.new_name
+        for client in self.parent().find_clients(self._should_forward):
+            client.send_packet(packet)
+
+    def _handle_user_color_changed(self, packet):
         for client in self.parent().find_clients(self._should_forward):
             client.send_packet(packet)
 
@@ -197,12 +222,24 @@ class Server(ServerSocket):
     The server implementation used by dedicated and integrated.
     """
 
+    @staticmethod
+    def add_trace_level():
+        logging.TRACE = 5
+        logging.addLevelName(logging.TRACE, "TRACE")
+        logging.Logger.trace = lambda inst, msg, *args, **kwargs: inst.log(
+            logging.TRACE, msg, *args, **kwargs
+        )
+        logging.trace = lambda msg, *args, **kwargs: logging.log(
+            logging.TRACE, msg, *args, **kwargs
+        )
+
     def __init__(self, logger, ssl, parent=None):
         ServerSocket.__init__(self, logger, parent)
         self._clients = []
         self._database = Database(self.local_file('database.db'))
         self._database.initialize()
         self._ssl = ssl
+        self._discovery = ClientsDiscovery(logger)
 
     def start(self, host, port=0):
         """
@@ -229,6 +266,8 @@ class Server(ServerSocket):
         sock.setblocking(0)
         sock.listen(5)
         self.connect(sock)
+        host, port = sock.getsockname()
+        self._discovery.start(host, port, self._ssl)
         return True
 
     def stop(self):
@@ -241,6 +280,7 @@ class Server(ServerSocket):
         for client in self._clients:
             client.disconnect()
         self.disconnect()
+        self._discovery.stop()
         return True
 
     @property

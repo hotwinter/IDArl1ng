@@ -10,12 +10,12 @@
 
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
-import collections
 import logging
 import socket
 import ssl
 
 from ..module import Module
+from ..shared.discovery import ServersDiscovery
 from .client import Client
 from .server import IntegratedServer
 
@@ -33,6 +33,12 @@ class Network(Module):
         self._server = None
         self._integrated = None
 
+        self._discovery = ServersDiscovery(logger.getChild(".Discovery"))
+
+    @property
+    def client(self):
+        return self._client
+
     @property
     def server(self):
         """
@@ -41,6 +47,10 @@ class Network(Module):
         :return: the server we're connected to
         """
         return self._server
+
+    @property
+    def discovery(self):
+        return self._discovery
 
     @property
     def connected(self):
@@ -52,9 +62,11 @@ class Network(Module):
         return self._client.connected if self._client else False
 
     def _install(self):
+        self._discovery.start()
         return True
 
     def _uninstall(self):
+        self._discovery.stop()
         self.disconnect()
         return True
 
@@ -70,6 +82,8 @@ class Network(Module):
             return False
         self._server = server.copy()  # Copy in case of source being changed
         host = self._server["host"]
+        if host == '0.0.0.0':
+            host = '127.0.0.1'
         port = self._server["port"]
         no_ssl = self._server["port"]
 
@@ -98,6 +112,12 @@ class Network(Module):
         sock.settimeout(0)
         sock.setblocking(0)
         self._client.connect(sock)
+
+        # TCP Keep-Alive options
+        cnt = self._plugin.config["keep"]["cnt"]
+        intvl = self._plugin.config["keep"]["intvl"]
+        idle = self._plugin.config["keep"]["idle"]
+        self._client.set_keep_alive(cnt, intvl, idle)
 
         # We're connected now
         logger.info("Connected")
@@ -153,7 +173,7 @@ class Network(Module):
             return False
         self._integrated = server
         integrated_arg = {
-            "host": "127.0.0.1",
+            "host": "0.0.0.0",
             "port": server.port,
             "no_ssl": True
         }
