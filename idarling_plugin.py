@@ -13,10 +13,6 @@
 from idarling.plugin import Plugin
 
 
-def PLUGIN_ENTRY():
-    """
-    Entry point for IDAPython plugins.
-
-    :return: the plugin instance
-    """
+def PLUGIN_ENTRY():  # noqa: N802
+    """Mandatory entry point for IDAPython plugins."""
     return Plugin()

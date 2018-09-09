@@ -19,35 +19,32 @@ import sys
 
 from PyQt5.QtCore import QCoreApplication, QEvent, QObject, QSocketNotifier
 
-from .packets import Packet, PacketDeferred, Query, Reply, Container
+from .packets import Container, Packet, PacketDeferred, Query, Reply
 
 
 class PacketEvent(QEvent):
     """
-    A Qt-event fired when a new packet is received by the client.
+    This Qt event is fired when a new packet is received by the client,
+    urging it to go check the incoming messages queue.
     """
 
+    EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
+
     def __init__(self):
-        """
-        Initializes the new packet event.
-        """
-        evtype = QEvent.Type(QEvent.registerEventType())
-        super(PacketEvent, self).__init__(evtype)
+        super(PacketEvent, self).__init__(PacketEvent.EVENT_TYPE)
 
 
 class ClientSocket(QObject):
     """
-    A class wrapping a Python socket and integrated into the Qt event loop.
+    This class is acts a bridge between a client socket and the Qt event loop.
+    By using a QSocketNotifier, we can be notified when some data is ready to
+    be read or written on the socket, not requiring an extra thread.
     """
+
     MAX_READ_SIZE = 4096
     MAX_WRITE_SIZE = 65535
 
     def __init__(self, logger, parent=None):
-        """
-        Initializes the client socket.
-
-        :param logger: the logger to user
-        """
         QObject.__init__(self, parent)
         self._logger = logger
         self._socket = None
@@ -67,26 +64,20 @@ class ClientSocket(QObject):
 
     @property
     def connected(self):
-        """
-        Returns if the socket is connected.
-
-        :return: is connected?
-        """
+        """Is the underlying socket connected?"""
         return self._connected
 
     def connect(self, sock):
-        """
-        Wraps the socket with the current object.
-
-        :param sock: the socket
-        """
-        self._read_notifier = QSocketNotifier(sock.fileno(),
-                                              QSocketNotifier.Read, self)
+        """Sets the underlying socket to utilize."""
+        self._read_notifier = QSocketNotifier(
+            sock.fileno(), QSocketNotifier.Read, self
+        )
         self._read_notifier.activated.connect(self._notify_read)
         self._read_notifier.setEnabled(True)
 
-        self._write_notifier = QSocketNotifier(sock.fileno(),
-                                               QSocketNotifier.Write, self)
+        self._write_notifier = QSocketNotifier(
+            sock.fileno(), QSocketNotifier.Write, self
+        )
         self._write_notifier.activated.connect(self._notify_write)
         self._write_notifier.setEnabled(False)
 
@@ -94,11 +85,7 @@ class ClientSocket(QObject):
         self._connected = True
 
     def disconnect(self, err=None):
-        """
-        Terminates the current connection.
-
-        :param err: the reason or None
-        """
+        """Terminates the current connection."""
         if not self._socket:
             return
         if err:
@@ -107,6 +94,7 @@ class ClientSocket(QObject):
         self._read_notifier.setEnabled(False)
         self._write_notifier.setEnabled(False)
         try:
+            self._socket.shutdown(socket.SHUT_RDWR)
             self._socket.close()
         except socket.error:
             pass
@@ -117,37 +105,38 @@ class ClientSocket(QObject):
         """
         Set the TCP keep-alive of the underlying socket.
 
-         It activates after `idle` seconds of idleness, then sends a
-         keep-alive ping once every `intvl` seconds, and closes the connection
-         after `cnt` failed ping.
+        It activates after idle seconds of idleness, sends a keep-alive ping
+        once every intvl seconds, and disconnects after `cnt`failed pings.
         """
         # Taken from https://github.com/markokr/skytools/
-        TCP_KEEPCNT = getattr(socket, 'TCP_KEEPCNT', None)
-        TCP_KEEPINTVL = getattr(socket, 'TCP_KEEPINTVL', None)
-        TCP_KEEPIDLE = getattr(socket, 'TCP_KEEPIDLE', None)
-        TCP_KEEPALIVE = getattr(socket, 'TCP_KEEPALIVE', None)
-        SIO_KEEPALIVE_VALS = getattr(socket, 'SIO_KEEPALIVE_VALS', None)
-        if TCP_KEEPIDLE is None and TCP_KEEPALIVE is None \
-                and sys.platform == 'darwin':
-            TCP_KEEPALIVE = 0x10
+        tcp_keepcnt = getattr(socket, "TCP_KEEPCNT", None)
+        tcp_keepintvl = getattr(socket, "TCP_KEEPINTVL", None)
+        tcp_keepidle = getattr(socket, "TCP_KEEPIDLE", None)
+        tcp_keepalive = getattr(socket, "TCP_KEEPALIVE", None)
+        sio_keeplive_vals = getattr(socket, "SIO_KEEPALIVE_VALS", None)
+        if (
+            tcp_keepidle is None
+            and tcp_keepalive is None
+            and sys.platform == "darwin"
+        ):
+            tcp_keepalive = 0x10
 
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        if TCP_KEEPCNT is not None:
-            self._socket.setsockopt(socket.IPPROTO_TCP, TCP_KEEPCNT, cnt)
-        if TCP_KEEPINTVL is not None:
-            self._socket.setsockopt(socket.IPPROTO_TCP, TCP_KEEPINTVL, intvl)
-        if TCP_KEEPIDLE is not None:
-            self._socket.setsockopt(socket.IPPROTO_TCP, TCP_KEEPIDLE, idle)
-        elif TCP_KEEPALIVE is not None:
-            self._socket.setsockopt(socket.IPPROTO_TCP, TCP_KEEPALIVE, idle)
-        elif SIO_KEEPALIVE_VALS is not None:
-            self._socket.ioctl(SIO_KEEPALIVE_VALS,
-                               (1, idle * 1000, intvl * 1000))
+        if tcp_keepcnt is not None:
+            self._socket.setsockopt(socket.IPPROTO_TCP, tcp_keepcnt, cnt)
+        if tcp_keepintvl is not None:
+            self._socket.setsockopt(socket.IPPROTO_TCP, tcp_keepintvl, intvl)
+        if tcp_keepidle is not None:
+            self._socket.setsockopt(socket.IPPROTO_TCP, tcp_keepidle, idle)
+        elif tcp_keepalive is not None:
+            self._socket.setsockopt(socket.IPPROTO_TCP, tcp_keepalive, idle)
+        elif sio_keeplive_vals is not None:
+            self._socket.ioctl(
+                sio_keeplive_vals, (1, idle * 1000, intvl * 1000)
+            )
 
     def _notify_read(self):
-        """
-        Callback called when some data is ready to be read on the socket.
-        """
+        """Callback called when some data is ready to be read on the socket."""
         # Read as much data as is available
         while True:
             try:
@@ -156,25 +145,31 @@ class ClientSocket(QObject):
                     self.disconnect()
                     break
             except socket.error as e:
-                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK) \
-                        and not isinstance(e, ssl.SSLWantReadError) \
-                        and not isinstance(e, ssl.SSLWantWriteError):
+                if (
+                    e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK)
+                    and not isinstance(e, ssl.SSLWantReadError)
+                    and not isinstance(e, ssl.SSLWantWriteError)
+                ):
                     self.disconnect(e)
                 break  # No more data available
             self._read_buffer.extend(data)
 
+        # Split the received data on new lines (= packets)
         while True:
             if self._read_packet is None:
-                if b'\n' in self._read_buffer:
-                    pos = self._read_buffer.index(b'\n')
+                if b"\n" in self._read_buffer:
+                    pos = self._read_buffer.index(b"\n")
                     line = self._read_buffer[:pos]
-                    self._read_buffer = self._read_buffer[pos + 1:]
+                    self._read_buffer = self._read_buffer[
+                        pos + 1 :  # noqa: E203
+                    ]
 
-                    # Try to parse the line as a packet
+                    # Try to parse the line (= packet)
                     try:
-                        dct = json.loads(line.decode('utf-8'))
-                        self._read_packet = Packet.parse_packet(dct,
-                                                                self._server)
+                        dct = json.loads(line.decode("utf-8"))
+                        self._read_packet = Packet.parse_packet(
+                            dct, self._server
+                        )
                     except Exception as e:
                         msg = "Invalid packet received: %s" % line
                         self._logger.warning(msg)
@@ -206,18 +201,17 @@ class ClientSocket(QObject):
             QCoreApplication.instance().postEvent(self, PacketEvent())
 
     def _notify_write(self):
-        """
-        Callback called when some data is ready to written on the socket.
-        """
+        """Callback called when some data is ready to written on the socket."""
         while True:
             if not self._write_buffer:
                 if not self._outgoing:
                     break  # No more packets to send
                 self._write_packet = self._outgoing.popleft()
 
+                # Dump the packet as a line
                 try:
                     line = json.dumps(self._write_packet.build_packet())
-                    line = line.encode('utf-8') + b'\n'
+                    line = line.encode("utf-8") + b"\n"
                 except Exception as e:
                     msg = "Invalid packet being sent: %s" % self._write_packet
                     self._logger.warning(msg)
@@ -233,20 +227,25 @@ class ClientSocket(QObject):
 
             # Send as many bytes as possible
             try:
-                count = min(len(self._write_buffer),
-                            ClientSocket.MAX_WRITE_SIZE)
+                count = min(
+                    len(self._write_buffer), ClientSocket.MAX_WRITE_SIZE
+                )
                 sent = self._socket.send(self._write_buffer[:count])
                 self._write_buffer = self._write_buffer[sent:]
             except socket.error as e:
-                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK) \
-                        and not isinstance(e, ssl.SSLWantReadError) \
-                        and not isinstance(e, ssl.SSLWantWriteError):
+                if (
+                    e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK)
+                    and not isinstance(e, ssl.SSLWantReadError)
+                    and not isinstance(e, ssl.SSLWantWriteError)
+                ):
                     self.disconnect(e)
                 break  # Can't write anything
 
             # Trigger the upback
-            if isinstance(self._write_packet, Container) \
-                    and self._write_packet.upback:
+            if (
+                isinstance(self._write_packet, Container)
+                and self._write_packet.upback
+            ):
                 self._write_packet.size -= count
                 total = len(self._write_packet.content)
                 sent = max(total - self._write_packet.size, 0)
@@ -257,12 +256,7 @@ class ClientSocket(QObject):
             self._write_notifier.setEnabled(False)
 
     def event(self, event):
-        """
-        Callback called when a Qt event is fired.
-
-        :param event: the event
-        :return: was the event handled?
-        """
+        """Callback called when a Qt event is fired."""
         if isinstance(event, PacketEvent):
             self._dispatch()
             event.accept()
@@ -272,9 +266,7 @@ class ClientSocket(QObject):
             return False
 
     def _dispatch(self):
-        """
-        Callback called when a packet event is fired.
-        """
+        """Callback called when a PacketEvent is received."""
         while self._incoming:
             packet = self._incoming.popleft()
             self._logger.debug("Received packet: %s" % packet)
@@ -288,12 +280,7 @@ class ClientSocket(QObject):
                 self._logger.warning("Unhandled packet received: %s" % packet)
 
     def send_packet(self, packet):
-        """
-        Sends a packet the other party.
-
-        :param packet: the packet
-        :return: a packet deferred if a reply is expected
-        """
+        """Sends a packet the other party."""
         if not self._connected:
             self._logger.warning("Sending packet while disconnected")
             return None
@@ -313,26 +300,17 @@ class ClientSocket(QObject):
         return None
 
     def recv_packet(self, packet):
-        """
-        Receives a packet from the other party.
-
-        :param packet: the packet
-        :return: has the packet been handled?
-        """
+        """Receives a packet from the other party."""
         raise NotImplementedError("recv_packet() not implemented")
 
 
 class ServerSocket(QObject):
     """
-    A class wrapping a server socket and integrated into the Qt event loop.
+    This class is acts a bridge between a server socket and the Qt event loop.
+    See the ClientSocket class for a more detailed explanation.
     """
 
     def __init__(self, logger, parent=None):
-        """
-        Initialize the server socket.
-
-        :param logger: the logger to use
-        """
         QObject.__init__(self, parent)
         self._logger = logger
         self._socket = None
@@ -341,21 +319,14 @@ class ServerSocket(QObject):
 
     @property
     def connected(self):
-        """
-        Returns if the socket is connected.
-
-        :return: is connected?
-        """
+        """Is the underlying socket connected?"""
         return self._connected
 
     def connect(self, sock):
-        """
-        Wraps the socket with the current object.
-
-        :param sock: the socket
-        """
-        self._accept_notifier = QSocketNotifier(sock.fileno(),
-                                                QSocketNotifier.Read, self)
+        """Sets the underlying socket to utilize."""
+        self._accept_notifier = QSocketNotifier(
+            sock.fileno(), QSocketNotifier.Read, self
+        )
         self._accept_notifier.activated.connect(self._notify_accept)
         self._accept_notifier.setEnabled(True)
 
@@ -363,11 +334,7 @@ class ServerSocket(QObject):
         self._connected = True
 
     def disconnect(self, err=None):
-        """
-        Terminates the current connection.
-
-        :param err: the reason or None
-        """
+        """Terminates the current connection."""
         if not self._socket:
             return
         if err:
@@ -382,9 +349,7 @@ class ServerSocket(QObject):
         self._connected = False
 
     def _notify_accept(self):
-        """
-        Callback called when a client is connecting.
-        """
+        """Callback called when a client is connecting."""
         while True:
             try:
                 sock, address = self._socket.accept()
@@ -396,9 +361,5 @@ class ServerSocket(QObject):
             self._accept(sock)
 
     def _accept(self, socket):
-        """
-        Handles the client who newly connected.
-
-        :param socket: the socket
-        """
-        raise NotImplementedError('accept() is not implemented')
+        """Handles the client who newly connected."""
+        raise NotImplementedError("accept() is not implemented")
