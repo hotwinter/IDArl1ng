@@ -16,7 +16,7 @@ import ida_netnode
 
 from .hooks import HexRaysHooks, Hooks, IDBHooks, IDPHooks, UIHooks, ViewHooks
 from ..module import Module
-from ..shared.commands import Subscribe, Unsubscribe
+from ..shared.commands import JoinSession, LeaveSession, ListDatabases
 
 
 class Core(Module):
@@ -29,8 +29,8 @@ class Core(Module):
 
     def __init__(self, plugin):
         super(Core, self).__init__(plugin)
-        self._repo = None
-        self._branch = None
+        self._project = None
+        self._database = None
         self._tick = 0
 
         self._idb_hooks = None
@@ -44,42 +44,33 @@ class Core(Module):
         self._hooked = False
 
     @property
-    def repo(self):
-        """Get the current repository."""
-        return self._repo
+    def project(self):
+        return self._project
 
-    @repo.setter
-    def repo(self, name):
-        """Set the the current repository and save the netnode."""
-        self._repo = name
+    @project.setter
+    def project(self, project):
+        self._project = project
         self.save_netnode()
 
     @property
-    def branch(self):
-        """Get the current branch."""
-        return self._branch
+    def database(self):
+        return self._database
 
-    @branch.setter
-    def branch(self, name):
-        """Set the current branch and save the netnode."""
-        self._branch = name
+    @database.setter
+    def database(self, database):
+        self._database = database
         self.save_netnode()
 
     @property
     def tick(self):
-        """Get the current tick count."""
         return self._tick
 
     @tick.setter
     def tick(self, tick):
-        """Set the current tick count and save the netnode."""
         self._tick = tick
         self.save_netnode()
 
     def _install(self):
-        self._plugin.logger.debug("Installing hooks")
-        core = self
-
         # Instantiate the hooks
         self._idb_hooks = IDBHooks(self._plugin)
         self._idp_hooks = IDPHooks(self._plugin)
@@ -87,10 +78,13 @@ class Core(Module):
         self._view_hooks = ViewHooks(self._plugin)
         self._ui_hooks = UIHooks(self._plugin)
 
+        core = self
+        self._plugin.logger.debug("Installing core hooks")
+
         class UIHooksCore(Hooks, ida_kernwin.UI_Hooks):
             """
-            The UI core hook is used to determine when IDA is fully loaded
-            and we can starting hooking to receive our user events.
+            The UI core hook is used to determine when IDA is fully loaded,
+            meaning that we can starting hooking to receive our user events.
             """
 
             def __init__(self, plugin):
@@ -98,25 +92,13 @@ class Core(Module):
                 Hooks.__init__(self, plugin)
 
             def ready_to_run(self, *_):
+                self._plugin.logger.debug("Ready to run hook")
                 core.load_netnode()
-
-                # Send a subscribe packet if this database is on the server
-                if core.repo and core.branch:
-                    self._plugin.network.send_packet(
-                        Subscribe(
-                            core.repo,
-                            core.branch,
-                            core.tick,
-                            self._plugin.config["user"]["name"],
-                            self._plugin.config["user"]["color"],
-                            ida_kernwin.get_screen_ea(),
-                        )
-                    )
-                    core.hook_all()
-
+                core.join_session()
                 self._plugin.interface.painter.set_custom_nav_colorizer()
 
             def database_inited(self, *_):
+                self._plugin.logger.debug("Database inited hook")
                 self._plugin.interface.painter.install()
 
         self._ui_hooks_core = UIHooksCore(self._plugin)
@@ -133,13 +115,13 @@ class Core(Module):
                 Hooks.__init__(self, plugin)
 
             def closebase(self):
-                core.unhook_all()
-                core.unsubscribe()
-
+                self._plugin.logger.debug("Closebase hook")
                 self._plugin.interface.painter.uninstall()
+                core.leave_session()
+                core.save_netnode()
 
-                core.repo = None
-                core.branch = None
+                core.project = None
+                core.database = None
                 core.ticks = 0
                 return 0
 
@@ -148,17 +130,18 @@ class Core(Module):
         return True
 
     def _uninstall(self):
-        self._plugin.logger.debug("Uninstalling hooks")
+        self._plugin.logger.debug("Uninstalling core hooks")
         self._idb_hooks_core.unhook()
         self._ui_hooks_core.unhook()
         self.unhook_all()
         return True
 
     def hook_all(self):
-        """Install all the user event hooks."""
+        """Install all the user events hooks."""
         if self._hooked:
             return
 
+        self._plugin.logger.debug("Installing hooks")
         self._idb_hooks.hook()
         self._idp_hooks.hook()
         self._hxe_hooks.hook()
@@ -167,10 +150,11 @@ class Core(Module):
         self._hooked = True
 
     def unhook_all(self):
-        """Uninstall all the user event hooks."""
+        """Uninstall all the user events hooks."""
         if not self._hooked:
             return
 
+        self._plugin.logger.debug("Uninstalling hooks")
         self._idb_hooks.unhook()
         self._idp_hooks.unhook()
         self._hxe_hooks.unhook()
@@ -182,50 +166,73 @@ class Core(Module):
         """
         Load data from our custom netnode. Netnodes are the mechanism used by
         IDA to load and save information into a database. IDArling uses its own
-        netnode to remember which repo and branch a database corresponds to.
+        netnode to remember which project and database a database belongs to.
         """
         node = ida_netnode.netnode(Core.NETNODE_NAME, 0, True)
 
-        self._repo = node.hashval("repo") or None
-        self._branch = node.hashval("branch") or None
+        self._project = node.hashval("project") or None
+        self._database = node.hashval("database") or None
         self._tick = int(node.hashval("tick") or "0")
 
         self._plugin.logger.debug(
-            "Loaded netnode: repo=%s, branch=%s, tick=%d"
-            % (self._repo, self._branch, self._tick)
+            "Loaded netnode: project=%s, database=%s, tick=%d"
+            % (self._project, self._database, self._tick)
         )
 
     def save_netnode(self):
         """Save data into our custom netnode."""
         node = ida_netnode.netnode(Core.NETNODE_NAME, 0, True)
 
-        if self._repo:
-            node.hashset("repo", str(self._repo))
-        if self._branch:
-            node.hashset("branch", str(self._branch))
+        if self._project:
+            node.hashset("project", str(self._project))
+        if self._database:
+            node.hashset("database", str(self._database))
         if self._tick:
             node.hashset("tick", str(self._tick))
 
         self._plugin.logger.debug(
-            "Saved netnode: repo=%s, branch=%s, tick=%d"
-            % (self._repo, self._branch, self._tick)
+            "Saved netnode: project=%s, database=%s, tick=%d"
+            % (self._project, self._database, self._tick)
         )
 
-    def subscribe(self):
-        """Send the subscribe packet."""
-        if self._repo and self._branch:
-            name = self._plugin.config["user"]["name"]
-            color = self._plugin.config["user"]["color"]
-            ea = ida_kernwin.get_screen_ea()
-            self._plugin.network.send_packet(
-                Subscribe(
-                    self._repo, self._branch, self._tick, name, color, ea
-                )
-            )
-            self.hook_all()
+    def join_session(self):
+        """Join the collaborative session."""
+        self._plugin.logger.debug("Joining session")
+        if self._project and self._database:
 
-    def unsubscribe(self):
-        """Send the unsubscribe packet."""
-        if self._repo and self._branch:
+            def databases_listed(reply):
+                if any(d.name == self._database for d in reply.databases):
+                    self._plugin.logger.debug("Database is on the server")
+                else:
+                    self._plugin.logger.debug("Database is not on the server")
+                    return  # Do not go further
+
+                name = self._plugin.config["user"]["name"]
+                color = self._plugin.config["user"]["color"]
+                ea = ida_kernwin.get_screen_ea()
+                self._plugin.network.send_packet(
+                    JoinSession(
+                        self._project,
+                        self._database,
+                        self._tick,
+                        name,
+                        color,
+                        ea,
+                    )
+                )
+                self.hook_all()
+
+            d = self._plugin.network.send_packet(
+                ListDatabases.Query(self._project)
+            )
+            if d:
+                d.add_callback(databases_listed)
+                d.add_errback(self._plugin.logger.exception)
+
+    def leave_session(self):
+        """Leave the collaborative session."""
+        self._plugin.logger.debug("Leaving session")
+        if self._project and self._database:
             name = self._plugin.config["user"]["name"]
-            self._plugin.network.send_packet(Unsubscribe(name))
+            self._plugin.network.send_packet(LeaveSession(name))
+            self.unhook_all()

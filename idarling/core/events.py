@@ -35,9 +35,9 @@ if sys.version_info > (3,):
 
 class Event(DefaultEvent):
     """
-    This is a common class for events that provides utilities methods to
-    encode/decode string and raw bytes. Events should also implement __call__
-    which is called when it needs to be replayed into IDA.
+    This is a common class for all events that provides utility methods to
+    encode/decode strings and raw bytes. Events should also implement __call__
+    which is called when the event needs to be replayed into IDA.
     """
 
     @staticmethod
@@ -69,7 +69,7 @@ class Event(DefaultEvent):
         return s.decode("raw_unicode_escape")
 
     def __call__(self):
-        """Reproduce the underlying user action into IDA."""
+        """Reproduce the underlying user event into IDA."""
         raise NotImplementedError("__call__() not implemented")
 
 
@@ -112,6 +112,8 @@ class RenamedEvent(Event):
         ida_name.set_name(
             self.ea, Event.encode(self.new_name), flags | ida_name.SN_NOWARN
         )
+        ida_kernwin.request_refresh(ida_kernwin.IWID_DISASMS)
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
 
 class FuncAddedEvent(Event):
@@ -281,57 +283,39 @@ class TiChangedEvent(Event):
 class LocalTypesChangedEvent(Event):
     __event__ = "local_types_changed"
 
-    def __init__(self, local_type):
+    def __init__(self, local_types):
         super(LocalTypesChangedEvent, self).__init__()
-        self.local_type = []
-        if local_type is not None:
-            for t in local_type:
-                if t is not None:
-                    self.local_type.append(
-                        (
-                            t[0],
-                            Event.decode_bytes(t[1]),
-                            Event.decode_bytes(t[2]),
-                            Event.decode_bytes(t[3]),
-                        )
-                    )
-                else:
-                    self.local_type.append(None)
+        self.local_types = []
+        for ordinal, name, ret in local_types:
+            name = Event.decode_bytes(name)
+            type, fields, fieldcmts = ret
+            type = Event.decode_bytes(type)
+            fields = Event.decode_bytes(fields)
+            fieldcmts = Event.decode_bytes(fieldcmts)
+            ret = type, fields, fieldcmts
+            self.local_types.append((ordinal, name, ret))
 
     def __call__(self):
-        local_type = []
-        for t in self.local_type:
-            if t is not None:
-                local_type.append(
-                    (
-                        t[0],
-                        Event.encode_bytes(t[1]),
-                        Event.encode_bytes(t[2]),
-                        Event.encode_bytes(t[3]),
-                    )
-                )
-            else:
-                local_type.append(None)
+        ti = ida_typeinf.get_idati()
 
-        def alloc_oridinal(target_ordinal):
-            # Get_ordinal_qty() will return (current max ordinal + 1)
-            missing_ord = (
-                target_ordinal - ida_typeinf.get_ordinal_qty(None) + 1
-            )
-            if missing_ord > 0:
-                ida_typeinf.alloc_type_ordinals(None, missing_ord)
+        ordinal_qty = ida_typeinf.get_ordinal_qty(ti)
+        last_ordinal = self.local_types[-1][0]
+        if ordinal_qty < last_ordinal:
+            ida_typeinf.alloc_type_ordinals(ti, last_ordinal - ordinal_qty)
+        else:
+            for ordinal in range(last_ordinal + 1, ordinal_qty + 1):
+                ida_typeinf.del_numbered_type(ti, ordinal)
 
-        for t in local_type:
-            if t is not None:
-                alloc_oridinal(t[0])
+        for ordinal, name, ret in self.local_types:
+            name = Event.encode_bytes(name)
+            type, fields, fieldcmts = ret
+            type = Event.encode_bytes(type)
+            fields = Event.encode_bytes(fields)
+            fieldcmts = Event.encode_bytes(fieldcmts)
 
-                # Can't change some local types if we don't delete them first
-                ida_typeinf.del_numbered_type(None, t[0])
-
-                cur_tinfo = ida_typeinf.tinfo_t()
-                cur_tinfo.deserialize(None, t[1], t[2])
-                cur_tinfo.set_numbered_type(None, t[0], 0, t[3])
-                ida_typeinf.import_type(None, -1, t[-1])
+            type_info = ida_typeinf.tinfo_t()
+            type_info.deserialize(ti, type, fields, fieldcmts)
+            type_info.set_numbered_type(ti, ordinal, 0, name)
 
         ida_kernwin.request_refresh(ida_kernwin.IWID_LOCTYPS)
 
@@ -806,14 +790,19 @@ class BytePatchedEvent(Event):
 
 class HexRaysEvent(Event):
     @staticmethod
-    def refresh_pseudocode_view():
+    def refresh_pseudocode_view(ea):
         """Refreshes the pseudocode view in IDA."""
         names = ["Pseudocode-%c" % chr(ord("A") + i) for i in range(5)]
         for name in names:
             widget = ida_kernwin.find_widget(name)
             if widget:
                 vu = ida_hexrays.get_widget_vdui(widget)
-                vu.refresh_view(True)
+
+                # Check if the address is in the same function
+                func_ea = vu.cfunc.entry_ea
+                func = ida_funcs.get_func(func_ea)
+                if ida_funcs.func_contains(func, ea):
+                    vu.refresh_view(True)
 
 
 class UserLabelsEvent(HexRaysEvent):
@@ -830,7 +819,7 @@ class UserLabelsEvent(HexRaysEvent):
             name = Event.encode(name)
             ida_hexrays.user_labels_insert(labels, org_label, name)
         ida_hexrays.save_user_labels(self.ea, labels)
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
 
 class UserCmtsEvent(HexRaysEvent):
@@ -849,7 +838,7 @@ class UserCmtsEvent(HexRaysEvent):
             tl.itp = tl_itp
             cmts.insert(tl, ida_hexrays.citem_cmt_t(Event.encode(cmt)))
         ida_hexrays.save_user_cmts(self.ea, cmts)
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
 
 class UserIflagsEvent(HexRaysEvent):
@@ -869,14 +858,14 @@ class UserIflagsEvent(HexRaysEvent):
         # ida_hexrays.save_user_iflags(self.ea, iflags)
 
         ida_hexrays.save_user_iflags(self.ea, ida_hexrays.user_iflags_new())
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
         cfunc = ida_hexrays.decompile(self.ea)
         for (cl_ea, cl_op), f in self.iflags:
             cl = ida_hexrays.citem_locator_t(cl_ea, cl_op)
             cfunc.set_user_iflags(cl, f)
         cfunc.save_user_iflags()
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
 
 class UserLvarSettingsEvent(HexRaysEvent):
@@ -906,7 +895,7 @@ class UserLvarSettingsEvent(HexRaysEvent):
         lvinf.stkoff_delta = self.lvar_settings["stkoff_delta"]
         lvinf.ulv_flags = self.lvar_settings["ulv_flags"]
         ida_hexrays.save_user_lvar_settings(self.ea, lvinf)
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
     @staticmethod
     def _get_lvar_saved_info(dct):
@@ -980,4 +969,4 @@ class UserNumformsEvent(HexRaysEvent):
             nf.type_name = Event.encode(_nf["type_name"])
             ida_hexrays.user_numforms_insert(numforms, ol, nf)
         ida_hexrays.save_user_numforms(self.ea, numforms)
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
