@@ -14,10 +14,9 @@ import ctypes
 from functools import partial
 import os
 import shutil
-import sys
 import tempfile
 
-import ida_diskio
+import ida_auto
 import ida_idaapi
 import ida_kernwin
 import ida_loader
@@ -27,13 +26,13 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QMessageBox, QProgressDialog
 
 from .dialogs import OpenDialog, SaveDialog
-from ..shared.commands import DownloadDatabase, Subscribe, UploadDatabase
+from ..shared.commands import DownloadFile, UpdateFile
 
 
 class Action(object):
     """
     An action is attached to a specific menu, has a custom text, icon, tooltip
-    and finally a handler that is called when it is selected by the user.
+    and finally a handler that is called when it is clicked by the user.
     """
 
     _ACTION_ID = None
@@ -46,16 +45,21 @@ class Action(object):
         self._text = text
         self._tooltip = tooltip
         self._icon = icon
+        self._icon_id = ida_idaapi.BADADDR
         self._handler = handler
 
-        self._icon_id = ida_idaapi.BADADDR
+    @property
+    def handler(self):
+        return self._handler
 
     def install(self):
+        action_name = self.__class__.__name__
+
         # Read and load the icon file
         icon_data = str(open(self._icon, "rb").read())
         self._icon_id = ida_kernwin.load_custom_icon(data=icon_data)
 
-        # Create the action description
+        # Create the action descriptor
         action_desc = ida_kernwin.action_desc_t(
             self._ACTION_ID,
             self._text,
@@ -65,22 +69,25 @@ class Action(object):
             self._icon_id,
         )
 
-        # Register the action using its description
+        # Register the action using its descriptor
         result = ida_kernwin.register_action(action_desc)
         if not result:
-            raise RuntimeError("Failed to register action")
+            raise RuntimeError("Failed to register action %s" % action_name)
 
         # Attach the action to the chosen menu
         result = ida_kernwin.attach_action_to_menu(
             self._menu, self._ACTION_ID, ida_kernwin.SETMENU_APP
         )
         if not result:
-            raise RuntimeError("Failed to attach action")
+            action_name = self.__class__.__name__
+            raise RuntimeError("Failed to install action %s" % action_name)
 
-        self._plugin.logger.debug("Installed the action")
+        self._plugin.logger.debug("Installed action %s" % action_name)
         return True
 
     def uninstall(self):
+        action_name = self.__class__.__name__
+
         # Detach the action from the chosen menu
         result = ida_kernwin.detach_action_from_menu(
             self._menu, self._ACTION_ID
@@ -97,11 +104,11 @@ class Action(object):
         ida_kernwin.free_custom_icon(self._icon_id)
         self._icon_id = ida_idaapi.BADADDR
 
-        self._plugin.logger.debug("Uninstalled the action")
+        self._plugin.logger.debug("Uninstalled action %s" % action_name)
         return True
 
     def update(self):
-        """Update the action's state (enabled or not)."""
+        """Check if the action should be enabled or not."""
         ida_kernwin.update_action_state(
             self._ACTION_ID, self._handler.update(None)
         )
@@ -115,7 +122,6 @@ class ActionHandler(ida_kernwin.action_handler_t):
     @staticmethod
     def _on_progress(progress, count, total):
         """Called when some progress has been made."""
-        # Update the progress bar
         progress.setRange(0, total)
         progress.setValue(count)
 
@@ -131,7 +137,8 @@ class ActionHandler(ida_kernwin.action_handler_t):
 
     def activate(self, ctx):
         """Called when the action is clicked by the user."""
-        # Show the associated dialog
+        dialog_name = self._DIALOG.__name__
+        self._plugin.logger.debug("Showing dialog %s" % dialog_name)
         dialog = self._DIALOG(self._plugin)
         dialog.accepted.connect(partial(self._dialog_accepted, dialog))
         dialog.exec_()
@@ -164,7 +171,7 @@ class OpenActionHandler(ActionHandler):
     _DIALOG = OpenDialog
 
     def _dialog_accepted(self, dialog):
-        repo, branch = dialog.get_result()
+        project, database = dialog.get_result()
 
         # Create the download progress dialog
         text = "Downloading database from server, please wait..."
@@ -177,8 +184,8 @@ class OpenActionHandler(ActionHandler):
         icon_path = self._plugin.plugin_resource("download.png")
         progress.setWindowIcon(QIcon(icon_path))
 
-        # Send a packet to download the database
-        packet = DownloadDatabase.Query(repo.name, branch.name)
+        # Send a packet to download the file
+        packet = DownloadFile.Query(project.name, database.name)
         callback = partial(self._on_progress, progress)
 
         def set_download_callback(reply):
@@ -186,23 +193,22 @@ class OpenActionHandler(ActionHandler):
 
         d = self._plugin.network.send_packet(packet)
         d.add_initback(set_download_callback)
-        d.add_callback(partial(self._database_downloaded, branch, progress))
+        d.add_callback(partial(self._file_downloaded, database, progress))
         d.add_errback(self._plugin.logger.exception)
         progress.show()
 
-    def _database_downloaded(self, branch, progress, reply):
-        """Called when the file has finished downloading."""
-        # Close the progress dialog
+    def _file_downloaded(self, database, progress, reply):
+        """Called when the file has been downloaded."""
         progress.close()
 
         # Get the absolute path of the file
         app_path = QCoreApplication.applicationFilePath()
         app_name = QFileInfo(app_path).fileName()
         file_ext = "i64" if "64" in app_name else "idb"
-        file_name = "%s_%s.%s" % (branch.repo, branch.name, file_ext)
+        file_name = "%s_%s.%s" % (database.project, database.name, file_ext)
         file_path = self._plugin.user_resource("files", file_name)
 
-        # Write the packet content to disk
+        # Write the file to disk
         with open(file_path, "wb") as output_file:
             output_file.write(reply.content)
         self._plugin.logger.info("Saved file %s" % file_name)
@@ -217,17 +223,7 @@ class OpenActionHandler(ActionHandler):
         # snapshot functionality in this effect.
 
         # Get the library to call functions not present in the bindings
-        idaname = "ida64" if "64" in app_name else "ida"
-        if sys.platform == "win32":
-            dllname, dlltype = idaname + ".dll", ctypes.windll
-        elif sys.platform == "linux2":
-            dllname, dlltype = "lib" + idaname + ".so", ctypes.cdll
-        elif sys.platform == "darwin":
-            dllname, dlltype = "lib" + idaname + ".dylib", ctypes.cdll
-        dllpath = ida_diskio.idadir(None)
-        if not os.path.exists(os.path.join(dllpath, dllname)):
-            dllpath = dllpath.replace("ida64", "ida")
-        dll = dlltype[os.path.join(dllpath, dllname)]
+        dll = self._plugin.core.get_ida_dll(app_name)
 
         # Close the old database using the term_database library function
         old_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
@@ -295,23 +291,13 @@ class SaveActionHandler(ActionHandler):
 
     _DIALOG = SaveDialog
 
-    def update(self, ctx):
-        if not ida_loader.get_path(ida_loader.PATH_TYPE_IDB):
-            return ida_kernwin.AST_DISABLE
-        return super(SaveActionHandler, self).update(ctx)
-
-    def _dialog_accepted(self, dialog):
-        repo, branch = dialog.get_result()
-        self._plugin.core.repo = repo.name
-        self._plugin.core.branch = branch.name
-
+    @staticmethod
+    def upload_file(plugin, packet):
         # Save the current database
-        self._plugin.core.save_netnode()
+        plugin.core.save_netnode()
         input_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
         ida_loader.save_database(input_path, 0)
 
-        # Create the packet that will hold the database
-        packet = UploadDatabase.Query(repo.name, branch.name)
         with open(input_path, "rb") as input_file:
             packet.content = input_file.read()
 
@@ -323,20 +309,21 @@ class SaveActionHandler(ActionHandler):
         window_flags = progress.windowFlags()  # Disable close button
         progress.setWindowFlags(window_flags & ~Qt.WindowCloseButtonHint)
         progress.setWindowTitle("Save to server")
-        icon_path = self._plugin.plugin_resource("upload.png")
+        icon_path = plugin.plugin_resource("upload.png")
         progress.setWindowIcon(QIcon(icon_path))
 
         # Send the packet to upload the file
-        packet.upback = partial(self._on_progress, progress)
-        d = self._plugin.network.send_packet(packet)
-        d.add_callback(
-            partial(self._database_uploaded, repo, branch, progress)
-        )
-        d.add_errback(self._plugin.logger.exception)
+        packet.upback = partial(SaveActionHandler._on_progress, progress)
+        d = plugin.network.send_packet(packet)
+        if d:
+            d.add_callback(
+                partial(SaveActionHandler.file_uploaded, plugin, progress)
+            )
+            d.add_errback(plugin.logger.exception)
         progress.show()
 
-    def _database_uploaded(self, repo, branch, progress, _):
-        # Close the progress dialog
+    @staticmethod
+    def file_uploaded(plugin, progress, _):
         progress.close()
 
         # Show a success dialog
@@ -345,17 +332,25 @@ class SaveActionHandler(ActionHandler):
         success.setStandardButtons(QMessageBox.Ok)
         success.setText("Database successfully uploaded!")
         success.setWindowTitle("Save to server")
-        icon_path = self._plugin.plugin_resource("upload.png")
+        icon_path = plugin.plugin_resource("upload.png")
         success.setWindowIcon(QIcon(icon_path))
         success.exec_()
 
-        # Subscribe to the new events stream
-        color = self._plugin.config["user"]["color"]
-        name = self._plugin.config["user"]["name"]
-        ea = ida_kernwin.get_screen_ea()
-        self._plugin.network.send_packet(
-            Subscribe(
-                repo.name, branch.name, self._plugin.core.tick, name, color, ea
-            )
-        )
-        self._plugin.core.hook_all()
+        # Subscribe to the event stream
+        plugin.core.join_session()
+
+    def update(self, ctx):
+        if not ida_loader.get_path(ida_loader.PATH_TYPE_IDB):
+            return ida_kernwin.AST_DISABLE
+        if not ida_auto.auto_is_ok():
+            return ida_kernwin.AST_DISABLE
+        return super(SaveActionHandler, self).update(ctx)
+
+    def _dialog_accepted(self, dialog):
+        project, database = dialog.get_result()
+        self._plugin.core.project = project.name
+        self._plugin.core.database = database.name
+
+        # Create the packet that will hold the file
+        packet = UpdateFile.Query(project.name, database.name)
+        SaveActionHandler.upload_file(self._plugin, packet)

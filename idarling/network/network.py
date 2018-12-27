@@ -10,6 +10,7 @@
 
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
+import errno
 import socket
 import ssl
 
@@ -28,30 +29,31 @@ class Network(Module):
 
     def __init__(self, plugin):
         super(Network, self).__init__(plugin)
+        self._discovery = ServersDiscovery(plugin.logger)
+
         self._client = None
         self._server = None
         self._integrated = None
-        self._discovery = ServersDiscovery(plugin.logger)
 
     @property
     def client(self):
-        """Get the client socket."""
         return self._client
 
     @property
     def server(self):
-        """Get the server information."""
         return self._server
 
     @property
     def discovery(self):
-        """Get the discovery socket."""
         return self._discovery
 
     @property
     def connected(self):
-        """Are we connected to a server?"""
         return self._client.connected if self._client else False
+
+    @property
+    def started(self):
+        return bool(self._integrated)
 
     def _install(self):
         self._discovery.start()
@@ -65,42 +67,30 @@ class Network(Module):
     def connect(self, server):
         """Connect to the specified server."""
         # Make sure we're not already connected
-        if self.connected:
-            return False
+        if self._client:
+            return
 
-        self._server = server.copy()  # Copy just in case
+        self._client = Client(self._plugin)
+        self._server = server.copy()  # Make a copy
         host = self._server["host"]
         if host == "0.0.0.0":  # Windows can't connect to 0.0.0.0
             host = "127.0.0.1"
         port = self._server["port"]
-        no_ssl = self._server["port"]
+        no_ssl = self._server["no_ssl"]
 
-        # Do the actual connection process
-        self._client = Client(self._plugin)
-        self._plugin.logger.info("Connecting to %s:%d..." % (host, port))
         # Update the user interface
         self._plugin.interface.update()
+        self._plugin.logger.info("Connecting to %s:%d..." % (host, port))
 
+        # Create a new socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
         # Wrap the socket in a SSL tunnel
         if not no_ssl:
             ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(sock, server_hostname=host)
-
-        try:
-            sock.connect((host, port))
-        except socket.error as e:
-            self._plugin.logger.warning("Connection failed")
-            self._plugin.logger.exception(e)
-            self._client = None
-            self._server = None
-
-            # Update the user interface
-            self._plugin.interface.update()
-            return False
-        sock.settimeout(0)  # No timeout
-        sock.setblocking(0)  # No blocking
-        self._client.connect(sock)
+            sock = ctx.wrap_socket(
+                sock, server_hostname=host, do_handshake_on_connect=False
+            )
+        self._client.wrap_socket(sock)
 
         # Set TCP keep-alive options
         cnt = self._plugin.config["keep"]["cnt"]
@@ -108,22 +98,21 @@ class Network(Module):
         idle = self._plugin.config["keep"]["idle"]
         self._client.set_keep_alive(cnt, intvl, idle)
 
-        self._plugin.logger.info("Connected")
-        # Update the user interface
-        self._plugin.interface.update()
-        # Subscribe to the events
-        self._plugin.core.subscribe()
-        return True
+        # Connect the socket
+        sock.settimeout(0)  # No timeout
+        sock.setblocking(0)  # No blocking
+        ret = sock.connect_ex((host, port))
+        if ret != 0 and ret != errno.EINPROGRESS and ret != errno.EWOULDBLOCK:
+            self._client.disconnect()
 
     def disconnect(self):
         """Disconnect from the current server."""
-        # Do the actual disconnection process
+        # Make sure we aren't already disconnected
+        if not self._client:
+            return
+
         self._plugin.logger.info("Disconnecting...")
-        if self.connected:
-            self._client.disconnect()
-        self._client = None
-        self._server = None
-        return True
+        self._client.disconnect()
 
     def send_packet(self, packet):
         """Send a packet to the server."""
@@ -134,13 +123,12 @@ class Network(Module):
     def start_server(self):
         """Start the integrated server."""
         if self._integrated:
-            return False
-        self.disconnect()
+            return
 
-        self._plugin.logger.info("Starting integrated server...")
+        self._plugin.logger.info("Starting the integrated server...")
         server = IntegratedServer(self._plugin)
         if not server.start("0.0.0.0"):
-            return False  # Couldn't start the server
+            return  # Couldn't start the server
         self._integrated = server
         integrated_arg = {
             "host": "0.0.0.0",
@@ -148,18 +136,15 @@ class Network(Module):
             "no_ssl": True,
         }
         # Connect the client to the server
-        return self.connect(integrated_arg)
+        self.disconnect()
+        self.connect(integrated_arg)
 
     def stop_server(self):
         """Stop the integrated server."""
         if not self._integrated:
-            return False
-        self._plugin.logger.info("Stopping integrated server...")
+            return
+
+        self._plugin.logger.info("Stopping the integrated server...")
+        self.disconnect()
         self._integrated.stop()
         self._integrated = None
-        self.disconnect()
-        return True
-
-    def server_running(self):
-        """Is the integrated server running?"""
-        return bool(self._integrated)

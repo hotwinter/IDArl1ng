@@ -10,7 +10,7 @@
 
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
-from .models import Branch, Repository
+from .models import Database, Project
 from .packets import (
     Command,
     Container,
@@ -21,113 +21,119 @@ from .packets import (
 )
 
 
-class GetRepositories(ParentCommand):
-    __command__ = "get_repos"
+class ListProjects(ParentCommand):
+    __command__ = "list_projects"
 
     class Query(IQuery, DefaultCommand):
         pass
 
     class Reply(IReply, Command):
-        def __init__(self, query, repos):
-            super(GetRepositories.Reply, self).__init__(query)
-            self.repos = repos
+        def __init__(self, query, projects):
+            super(ListProjects.Reply, self).__init__(query)
+            self.projects = projects
 
         def build_command(self, dct):
-            dct["repos"] = [repo.build({}) for repo in self.repos]
+            dct["projects"] = [project.build({}) for project in self.projects]
 
         def parse_command(self, dct):
-            self.repos = [Repository.new(repo) for repo in dct["repos"]]
+            self.projects = [
+                Project.new(project) for project in dct["projects"]
+            ]
 
 
-class GetBranches(ParentCommand):
-    __command__ = "get_branches"
+class ListDatabases(ParentCommand):
+    __command__ = "list_databases"
 
     class Query(IQuery, DefaultCommand):
-        def __init__(self, repo):
-            super(GetBranches.Query, self).__init__()
-            self.repo = repo
+        def __init__(self, project):
+            super(ListDatabases.Query, self).__init__()
+            self.project = project
 
     class Reply(IReply, Command):
-        def __init__(self, query, branches):
-            super(GetBranches.Reply, self).__init__(query)
-            self.branches = branches
+        def __init__(self, query, databases):
+            super(ListDatabases.Reply, self).__init__(query)
+            self.databases = databases
 
         def build_command(self, dct):
-            dct["branches"] = [br.build({}) for br in self.branches]
+            dct["databases"] = [
+                database.build({}) for database in self.databases
+            ]
 
         def parse_command(self, dct):
-            self.branches = [Branch.new(br) for br in dct["branches"]]
+            self.databases = [
+                Database.new(database) for database in dct["databases"]
+            ]
 
 
-class NewRepository(ParentCommand):
-    __command__ = "new_repo"
+class CreateProject(ParentCommand):
+    __command__ = "create_project"
 
     class Query(IQuery, Command):
-        def __init__(self, repo):
-            super(NewRepository.Query, self).__init__()
-            self.repo = repo
+        def __init__(self, project):
+            super(CreateProject.Query, self).__init__()
+            self.project = project
 
         def build_command(self, dct):
-            self.repo.build(dct["repo"])
+            self.project.build(dct["project"])
 
         def parse_command(self, dct):
-            self.repo = Repository.new(dct["repo"])
+            self.project = Project.new(dct["project"])
 
     class Reply(IReply, Command):
         pass
 
 
-class NewBranch(ParentCommand):
-    __command__ = "new_branch"
+class CreateDatabase(ParentCommand):
+    __command__ = "create_database"
 
     class Query(IQuery, Command):
-        def __init__(self, branch):
-            super(NewBranch.Query, self).__init__()
-            self.branch = branch
+        def __init__(self, database):
+            super(CreateDatabase.Query, self).__init__()
+            self.database = database
 
         def build_command(self, dct):
-            self.branch.build(dct["branch"])
+            self.database.build(dct["database"])
 
         def parse_command(self, dct):
-            self.branch = Branch.new(dct["branch"])
+            self.database = Database.new(dct["database"])
 
     class Reply(IReply, Command):
         pass
 
 
-class UploadDatabase(ParentCommand):
-    __command__ = "upload_db"
+class UpdateFile(ParentCommand):
+    __command__ = "update_file"
 
     class Query(IQuery, Container, DefaultCommand):
-        def __init__(self, repo, branch):
-            super(UploadDatabase.Query, self).__init__()
-            self.repo = repo
-            self.branch = branch
+        def __init__(self, project, database):
+            super(UpdateFile.Query, self).__init__()
+            self.project = project
+            self.database = database
 
     class Reply(IReply, Command):
         pass
 
 
-class DownloadDatabase(ParentCommand):
-    __command__ = "download_db"
+class DownloadFile(ParentCommand):
+    __command__ = "download_file"
 
     class Query(IQuery, DefaultCommand):
-        def __init__(self, repo, branch):
-            super(DownloadDatabase.Query, self).__init__()
-            self.repo = repo
-            self.branch = branch
+        def __init__(self, project, database):
+            super(DownloadFile.Query, self).__init__()
+            self.project = project
+            self.database = database
 
     class Reply(IReply, Container, Command):
         pass
 
 
-class Subscribe(DefaultCommand):
-    __command__ = "subscribe"
+class JoinSession(DefaultCommand):
+    __command__ = "join_session"
 
-    def __init__(self, repo, branch, tick, name, color, ea, silent=True):
-        super(Subscribe, self).__init__()
-        self.repo = repo
-        self.branch = branch
+    def __init__(self, project, database, tick, name, color, ea, silent=True):
+        super(JoinSession, self).__init__()
+        self.project = project
+        self.database = database
         self.tick = tick
         self.name = name
         self.color = color
@@ -135,48 +141,48 @@ class Subscribe(DefaultCommand):
         self.silent = silent
 
 
-class Unsubscribe(DefaultCommand):
-    __command__ = "unsubscribe"
+class LeaveSession(DefaultCommand):
+    __command__ = "leave_session"
 
     def __init__(self, name, silent=True):
-        super(Unsubscribe, self).__init__()
+        super(LeaveSession, self).__init__()
         self.name = name
         self.silent = silent
 
 
-class UpdateCursors(DefaultCommand):
-    __command__ = "update_cursors"
-
-    def __init__(self, name, ea, color):
-        super(UpdateCursors, self).__init__()
-        self.name = name
-        self.ea = ea
-        self.color = color
-
-
-class UserRenamed(DefaultCommand):
-    __command__ = "user_renamed"
+class UpdateUserName(DefaultCommand):
+    __command__ = "update_user_name"
 
     def __init__(self, old_name, new_name):
-        super(UserRenamed, self).__init__()
+        super(UpdateUserName, self).__init__()
         self.old_name = old_name
         self.new_name = new_name
 
 
-class UserColorChanged(DefaultCommand):
-    __command__ = "user_color_changed"
+class UpdateUserColor(DefaultCommand):
+    __command__ = "update_user_color"
 
     def __init__(self, name, old_color, new_color):
-        super(UserColorChanged, self).__init__()
+        super(UpdateUserColor, self).__init__()
         self.name = name
         self.old_color = old_color
         self.new_color = new_color
 
 
-class InviteTo(DefaultCommand):
-    __command__ = "invite_to"
+class UpdateLocation(DefaultCommand):
+    __command__ = "update_location"
+
+    def __init__(self, name, ea, color):
+        super(UpdateLocation, self).__init__()
+        self.name = name
+        self.ea = ea
+        self.color = color
+
+
+class InviteToLocation(DefaultCommand):
+    __command__ = "invite_to_location"
 
     def __init__(self, name, loc):
-        super(InviteTo, self).__init__()
+        super(InviteToLocation, self).__init__()
         self.name = name
         self.loc = loc

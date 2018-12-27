@@ -42,14 +42,14 @@ from PyQt5.QtWidgets import (
 )
 
 from ..shared.commands import (
-    GetBranches,
-    GetRepositories,
-    NewBranch,
-    NewRepository,
-    UserColorChanged,
-    UserRenamed,
+    CreateDatabase,
+    CreateProject,
+    ListDatabases,
+    ListProjects,
+    UpdateUserColor,
+    UpdateUserName,
 )
-from ..shared.models import Branch, Repository
+from ..shared.models import Database, Project
 
 
 class OpenDialog(QDialog):
@@ -58,11 +58,10 @@ class OpenDialog(QDialog):
     def __init__(self, plugin):
         super(OpenDialog, self).__init__()
         self._plugin = plugin
-        self._repos = None
-        self._branches = None
+        self._projects = None
+        self._databases = None
 
         # General setup of the dialog
-        self._plugin.logger.debug("Showing the database selection dialog")
         self.setWindowTitle("Open from Remote Server")
         icon_path = self._plugin.plugin_resource("download.png")
         self.setWindowIcon(QIcon(icon_path))
@@ -71,21 +70,24 @@ class OpenDialog(QDialog):
         # Setup of the layout and widgets
         layout = QVBoxLayout(self)
         main = QWidget(self)
-        main_layout = QHBoxLayout(main)
+        main_layout = QGridLayout(main)
         layout.addWidget(main)
 
         self._left_side = QWidget(main)
         self._left_layout = QVBoxLayout(self._left_side)
-        self._repos_table = QTableWidget(0, 1, self._left_side)
-        self._repos_table.setHorizontalHeaderLabels(("Repositories",))
-        self._repos_table.horizontalHeader().setSectionsClickable(False)
-        self._repos_table.horizontalHeader().setStretchLastSection(True)
-        self._repos_table.verticalHeader().setVisible(False)
-        self._repos_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._repos_table.setSelectionMode(QTableWidget.SingleSelection)
-        self._repos_table.itemSelectionChanged.connect(self._repo_clicked)
-        self._left_layout.addWidget(self._repos_table)
-        main_layout.addWidget(self._left_side)
+        self._projects_table = QTableWidget(0, 1, self._left_side)
+        self._projects_table.setHorizontalHeaderLabels(("Projects",))
+        self._projects_table.horizontalHeader().setSectionsClickable(False)
+        self._projects_table.horizontalHeader().setStretchLastSection(True)
+        self._projects_table.verticalHeader().setVisible(False)
+        self._projects_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._projects_table.setSelectionMode(QTableWidget.SingleSelection)
+        self._projects_table.itemSelectionChanged.connect(
+            self._project_clicked
+        )
+        self._left_layout.addWidget(self._projects_table)
+        main_layout.addWidget(self._left_side, 0, 0)
+        main_layout.setColumnStretch(0, 1)
 
         right_side = QWidget(main)
         right_layout = QVBoxLayout(right_side)
@@ -102,24 +104,28 @@ class OpenDialog(QDialog):
         details_layout.addWidget(self._date_label, 1, 1)
         details_layout.setColumnStretch(1, 1)
         right_layout.addWidget(details_group)
-        main_layout.addWidget(right_side)
+        main_layout.addWidget(right_side, 0, 1)
+        main_layout.setColumnStretch(1, 2)
 
-        self._branches_group = QGroupBox("Branches", right_side)
-        self._branches_layout = QVBoxLayout(self._branches_group)
-        self._branches_table = QTableWidget(0, 3, self._branches_group)
+        self._databases_group = QGroupBox("Databases", right_side)
+        self._databases_layout = QVBoxLayout(self._databases_group)
+        self._databases_table = QTableWidget(0, 3, self._databases_group)
         labels = ("Name", "Date", "Ticks")
-        self._branches_table.setHorizontalHeaderLabels(labels)
-        horizontal_header = self._branches_table.horizontalHeader()
+        self._databases_table.setHorizontalHeaderLabels(labels)
+        horizontal_header = self._databases_table.horizontalHeader()
         horizontal_header.setSectionsClickable(False)
         horizontal_header.setSectionResizeMode(0, horizontal_header.Stretch)
-        self._branches_table.verticalHeader().setVisible(False)
-        self._branches_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self._branches_table.setSelectionMode(QTableWidget.SingleSelection)
-        self._branches_table.itemSelectionChanged.connect(self._branch_clicked)
-        branch_double_clicked = self._branch_double_clicked
-        self._branches_table.itemDoubleClicked.connect(branch_double_clicked)
-        self._branches_layout.addWidget(self._branches_table)
-        right_layout.addWidget(self._branches_group)
+        self._databases_table.verticalHeader().setVisible(False)
+        self._databases_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._databases_table.setSelectionMode(QTableWidget.SingleSelection)
+        self._databases_table.itemSelectionChanged.connect(
+            self._database_clicked
+        )
+        self._databases_table.itemDoubleClicked.connect(
+            self._database_double_clicked
+        )
+        self._databases_layout.addWidget(self._databases_table)
+        right_layout.addWidget(self._databases_group)
 
         buttons_widget = QWidget(self)
         buttons_layout = QHBoxLayout(buttons_widget)
@@ -133,75 +139,76 @@ class OpenDialog(QDialog):
         buttons_layout.addWidget(self._accept_button)
         layout.addWidget(buttons_widget)
 
-        # Ask the server for the list of repositories
-        d = self._plugin.network.send_packet(GetRepositories.Query())
-        d.add_callback(self._repos_received)
+        # Ask the server for the list of projects
+        d = self._plugin.network.send_packet(ListProjects.Query())
+        d.add_callback(self._projects_listed)
         d.add_errback(self._plugin.logger.exception)
 
-    def _repos_received(self, reply):
-        """Called when the list of repositories is received."""
-        self._repos = reply.repos
-        self._refresh_repos()
+    def _projects_listed(self, reply):
+        """Called when the projects list is received."""
+        self._projects = reply.projects
+        self._refresh_projects()
 
-    def _refresh_repos(self):
-        """Refreshes the repositories table."""
-        self._repos_table.setRowCount(len(self._repos))
-        for i, repo in enumerate(self._repos):
-            item = QTableWidgetItem(repo.name)
-            item.setData(Qt.UserRole, repo)
+    def _refresh_projects(self):
+        """Refreshes the projects table."""
+        self._projects_table.setRowCount(len(self._projects))
+        for i, project in enumerate(self._projects):
+            item = QTableWidgetItem(project.name)
+            item.setData(Qt.UserRole, project)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            self._repos_table.setItem(i, 0, item)
+            self._projects_table.setItem(i, 0, item)
 
-    def _repo_clicked(self):
-        """Called when a repository item is clicked."""
-        repo = self._repos_table.selectedItems()[0].data(Qt.UserRole)
-        self._file_label.setText("<b>File:</b> %s" % str(repo.file))
-        self._hash_label.setText("<b>Hash:</b> %s" % str(repo.hash))
-        self._type_label.setText("<b>Type:</b> %s" % str(repo.type))
-        self._date_label.setText("<b>Date:</b> %s" % str(repo.date))
+    def _project_clicked(self):
+        """Called when a project item is clicked."""
+        project = self._projects_table.selectedItems()[0].data(Qt.UserRole)
+        self._file_label.setText("<b>File:</b> %s" % str(project.file))
+        self._hash_label.setText("<b>Hash:</b> %s" % str(project.hash))
+        self._type_label.setText("<b>Type:</b> %s" % str(project.type))
+        self._date_label.setText("<b>Date:</b> %s" % str(project.date))
 
-        # Ask the server for the list of branches
-        d = self._plugin.network.send_packet(GetBranches.Query(repo.name))
-        d.add_callback(partial(self._branches_received))
+        # Ask the server for the list of databases
+        d = self._plugin.network.send_packet(ListDatabases.Query(project.name))
+        d.add_callback(partial(self._databases_listed))
         d.add_errback(self._plugin.logger.exception)
 
-    def _branches_received(self, reply):
-        """Called when the list of branches is received."""
-        self._branches = reply.branches
-        self._refresh_branches()
+    def _databases_listed(self, reply):
+        """Called when the databases list is received."""
+        self._databases = reply.databases
+        self._refresh_databases()
 
-    def _refresh_branches(self):
-        """Refreshes the table of branches."""
+    def _refresh_databases(self):
+        """Refreshes the table of databases."""
 
-        def create_item(text, branch):
+        def create_item(text, database):
             item = QTableWidgetItem(text)
-            item.setData(Qt.UserRole, branch)
+            item.setData(Qt.UserRole, database)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            if branch.tick == -1:
+            if database.tick == -1:
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
             return item
 
-        self._branches_table.setRowCount(len(self._branches))
-        for i, branch in enumerate(self._branches):
-            self._branches_table.setItem(
-                i, 0, create_item(branch.name, branch)
+        self._databases_table.setRowCount(len(self._databases))
+        for i, database in enumerate(self._databases):
+            self._databases_table.setItem(
+                i, 0, create_item(database.name, database)
             )
-            self._branches_table.setItem(
-                i, 1, create_item(branch.date, branch)
+            self._databases_table.setItem(
+                i, 1, create_item(database.date, database)
             )
-            tick = str(branch.tick) if branch.tick != -1 else "<none>"
-            self._branches_table.setItem(i, 2, create_item(tick, branch))
+            tick = str(database.tick) if database.tick != -1 else "<none>"
+            self._databases_table.setItem(i, 2, create_item(tick, database))
 
-    def _branch_clicked(self):
+    def _database_clicked(self):
         self._accept_button.setEnabled(True)
 
-    def _branch_double_clicked(self):
+    def _database_double_clicked(self):
         self.accept()
 
     def get_result(self):
-        """Get the repository and branch selected by the user."""
-        repo = self._repos_table.selectedItems()[0].data(Qt.UserRole)
-        return repo, self._branches_table.selectedItems()[0].data(Qt.UserRole)
+        """Get the project and database selected by the user."""
+        project = self._projects_table.selectedItems()[0].data(Qt.UserRole)
+        database = self._databases_table.selectedItems()[0].data(Qt.UserRole)
+        return project, database
 
 
 class SaveDialog(OpenDialog):
@@ -212,50 +219,54 @@ class SaveDialog(OpenDialog):
 
     def __init__(self, plugin):
         super(SaveDialog, self).__init__(plugin)
-        self._repo = None
+        self._project = None
 
         # General setup of the dialog
         self.setWindowTitle("Save to Remote Server")
         icon_path = self._plugin.plugin_resource("upload.png")
         self.setWindowIcon(QIcon(icon_path))
 
-        # Setup the layout and widgets
+        # Change the accept button text
         self._accept_button.setText("Save")
 
-        # Add a button to create a new repository
-        new_repo_button = QPushButton("New Repository", self._left_side)
-        new_repo_button.clicked.connect(self._new_repo_clicked)
-        self._left_layout.addWidget(new_repo_button)
+        # Add a button to create a project
+        create_project_button = QPushButton("Create Project", self._left_side)
+        create_project_button.clicked.connect(self._create_project_clicked)
+        self._left_layout.addWidget(create_project_button)
 
-        # Add a button to create a new branch
-        self._new_branch_button = QPushButton(
-            "New Branch", self._branches_group
+        # Add a button to create a database
+        self._create_database_button = QPushButton(
+            "Create Database", self._databases_group
         )
-        self._new_branch_button.setEnabled(False)
-        self._new_branch_button.clicked.connect(self._new_branch_clicked)
-        self._branches_layout.addWidget(self._new_branch_button)
+        self._create_database_button.setEnabled(False)
+        self._create_database_button.clicked.connect(
+            self._create_database_clicked
+        )
+        self._databases_layout.addWidget(self._create_database_button)
 
-    def _repo_clicked(self):
-        super(SaveDialog, self)._repo_clicked()
-        self._repo = self._repos_table.selectedItems()[0].data(Qt.UserRole)
-        self._new_branch_button.setEnabled(True)
+    def _project_clicked(self):
+        super(SaveDialog, self)._project_clicked()
+        self._project = self._projects_table.selectedItems()[0].data(
+            Qt.UserRole
+        )
+        self._create_database_button.setEnabled(True)
 
-    def _new_repo_clicked(self):
-        dialog = NewRepoDialog(self._plugin)
-        dialog.accepted.connect(partial(self._new_repo_accepted, dialog))
+    def _create_project_clicked(self):
+        dialog = CreateProjectDialog(self._plugin)
+        dialog.accepted.connect(partial(self._create_project_accepted, dialog))
         dialog.exec_()
 
-    def _new_repo_accepted(self, dialog):
-        """Called when the repository creation dialog is accepted."""
+    def _create_project_accepted(self, dialog):
+        """Called when the project creation dialog is accepted."""
         name = dialog.get_result()
 
-        # Ensure we don't already have a repo with that name
-        if any(repo.name == name for repo in self._repos):
+        # Ensure we don't already have a project with that name
+        if any(project.name == name for project in self._projects):
             failure = QMessageBox()
             failure.setIcon(QMessageBox.Warning)
             failure.setStandardButtons(QMessageBox.Ok)
-            failure.setText("A repository with that name already exists!")
-            failure.setWindowTitle("New Repository")
+            failure.setText("A project with that name already exists!")
+            failure.setWindowTitle("New Project")
             icon_path = self._plugin.plugin_resource("upload.png")
             failure.setWindowIcon(QIcon(icon_path))
             failure.exec_()
@@ -267,45 +278,47 @@ class SaveDialog(OpenDialog):
         type = ida_loader.get_file_type_name()
         date_format = "%Y/%m/%d %H:%M"
         date = datetime.datetime.now().strftime(date_format)
-        repo = Repository(name, hash, file, type, date)
-        d = self._plugin.network.send_packet(NewRepository.Query(repo))
-        d.add_callback(partial(self._new_repo_received, repo))
+        project = Project(name, hash, file, type, date)
+        d = self._plugin.network.send_packet(CreateProject.Query(project))
+        d.add_callback(partial(self._project_created, project))
         d.add_errback(self._plugin.logger.exception)
 
-    def _new_repo_received(self, repo, _):
-        """Called when the new repository reply is received."""
-        self._repos.append(repo)
-        self._refresh_repos()
-        row = len(self._repos) - 1
-        self._repos_table.selectRow(row)
+    def _project_created(self, project, _):
+        """Called when the create project reply is received."""
+        self._projects.append(project)
+        self._refresh_projects()
+        row = len(self._projects) - 1
+        self._projects_table.selectRow(row)
         self._accept_button.setEnabled(False)
 
-    def _refresh_repos(self):
-        super(SaveDialog, self)._refresh_repos()
+    def _refresh_projects(self):
+        super(SaveDialog, self)._refresh_projects()
         hash = ida_nalt.retrieve_input_file_md5().lower()
-        for row in range(self._repos_table.rowCount()):
-            item = self._repos_table.item(row, 0)
-            repo = item.data(Qt.UserRole)
-            if repo.hash != hash:
+        for row in range(self._projects_table.rowCount()):
+            item = self._projects_table.item(row, 0)
+            project = item.data(Qt.UserRole)
+            if project.hash != hash:
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
 
-    def _new_branch_clicked(self):
-        """Called when the new branch button is clicked."""
-        dialog = NewBranchDialog(self._plugin)
-        dialog.accepted.connect(partial(self._new_branch_accepted, dialog))
+    def _create_database_clicked(self):
+        """Called when the create database button is clicked."""
+        dialog = CreateDatabaseDialog(self._plugin)
+        dialog.accepted.connect(
+            partial(self._create_database_accepted, dialog)
+        )
         dialog.exec_()
 
-    def _new_branch_accepted(self, dialog):
-        """Called when the new branch dialog is accepted."""
+    def _create_database_accepted(self, dialog):
+        """Called when the database creation dialog is accepted."""
         name = dialog.get_result()
 
-        # Ensure we don't already have a branch with that name
-        if any(br.name == name for br in self._branches):
+        # Ensure we don't already have a database with that name
+        if any(database.name == name for database in self._databases):
             failure = QMessageBox()
             failure.setIcon(QMessageBox.Warning)
             failure.setStandardButtons(QMessageBox.Ok)
-            failure.setText("A branch with that name already exists!")
-            failure.setWindowTitle("New Branch")
+            failure.setText("A database with that name already exists!")
+            failure.setWindowTitle("New Database")
             icon_path = self._plugin.plugin_resource("upload.png")
             failure.setWindowIcon(QIcon(icon_path))
             failure.exec_()
@@ -314,36 +327,36 @@ class SaveDialog(OpenDialog):
         # Get all the information we need and sent it to the server
         date_format = "%Y/%m/%d %H:%M"
         date = datetime.datetime.now().strftime(date_format)
-        branch = Branch(self._repo.name, name, date, -1)
-        d = self._plugin.network.send_packet(NewBranch.Query(branch))
-        d.add_callback(partial(self._new_branch_received, branch))
+        database = Database(self._project.name, name, date, -1)
+        d = self._plugin.network.send_packet(CreateDatabase.Query(database))
+        d.add_callback(partial(self._database_created, database))
         d.add_errback(self._plugin.logger.exception)
 
-    def _new_branch_received(self, branch, _):
-        """Called when the new branch reply is received."""
-        self._branches.append(branch)
-        self._refresh_branches()
-        row = len(self._branches) - 1
-        self._branches_table.selectRow(row)
+    def _database_created(self, database, _):
+        """Called when the new database reply is received."""
+        self._databases.append(database)
+        self._refresh_databases()
+        row = len(self._databases) - 1
+        self._databases_table.selectRow(row)
 
-    def _refresh_branches(self):
-        super(SaveDialog, self)._refresh_branches()
-        for row in range(self._branches_table.rowCount()):
+    def _refresh_databases(self):
+        super(SaveDialog, self)._refresh_databases()
+        for row in range(self._databases_table.rowCount()):
             for col in range(3):
-                item = self._branches_table.item(row, col)
+                item = self._databases_table.item(row, col)
                 item.setFlags(item.flags() | Qt.ItemIsEnabled)
 
 
-class NewRepoDialog(QDialog):
-    """The dialog shown when an user wants to create a new repository."""
+class CreateProjectDialog(QDialog):
+    """The dialog shown when an user wants to create a project."""
 
     def __init__(self, plugin):
-        super(NewRepoDialog, self).__init__()
+        super(CreateProjectDialog, self).__init__()
         self._plugin = plugin
 
         # General setup of the dialog
-        self._plugin.logger.debug("New repo dialog")
-        self.setWindowTitle("New Repository")
+        self._plugin.logger.debug("Create project dialog")
+        self.setWindowTitle("Create Project")
         icon_path = plugin.plugin_resource("upload.png")
         self.setWindowIcon(QIcon(icon_path))
         self.resize(100, 100)
@@ -351,7 +364,7 @@ class NewRepoDialog(QDialog):
         # Set up the layout and widgets
         layout = QVBoxLayout(self)
 
-        self._nameLabel = QLabel("<b>Repository Name</b>")
+        self._nameLabel = QLabel("<b>Project Name</b>")
         layout.addWidget(self._nameLabel)
         self._nameEdit = QLineEdit()
         self._nameEdit.setValidator(QRegExpValidator(QRegExp("[a-zA-Z0-9-]+")))
@@ -372,16 +385,16 @@ class NewRepoDialog(QDialog):
         return self._nameEdit.text()
 
 
-class NewBranchDialog(NewRepoDialog):
+class CreateDatabaseDialog(CreateProjectDialog):
     """
-    The dialog shown when an user wants to create a new branch. We extend the
-    new repository dialog to avoid duplicating the UI setup code.
+    The dialog shown when an user wants to create a database. We extend the
+    create project dialog to avoid duplicating the UI setup code.
     """
 
     def __init__(self, plugin):
-        super(NewBranchDialog, self).__init__(plugin)
-        self.setWindowTitle("New Branch")
-        self._nameLabel.setText("<b>Branch Name</b>")
+        super(CreateDatabaseDialog, self).__init__(plugin)
+        self.setWindowTitle("Create Database")
+        self._nameLabel.setText("<b>Database Name</b>")
 
 
 class SettingsDialog(QDialog):
@@ -434,11 +447,48 @@ class SettingsDialog(QDialog):
         self._name_line_edit.setText(name)
         user_layout.addWidget(self._name_line_edit)
 
-        text = "Show other users in the navigation bar"
-        self._navbar_colorizer_checkbox = QCheckBox(text)
-        layout.addRow(self._navbar_colorizer_checkbox)
-        checked = self._plugin.config["user"]["navbar_colorizer"]
-        self._navbar_colorizer_checkbox.setChecked(checked)
+        text = "Disable all user cursors"
+        self._disable_all_cursors_checkbox = QCheckBox(text)
+        layout.addRow(self._disable_all_cursors_checkbox)
+        navbar_checked = not self._plugin.config["cursors"]["navbar"]
+        funcs_checked = not self._plugin.config["cursors"]["funcs"]
+        disasm_checked = not self._plugin.config["cursors"]["disasm"]
+        all_checked = navbar_checked and funcs_checked and disasm_checked
+        self._disable_all_cursors_checkbox.setChecked(all_checked)
+
+        def state_changed(state):
+            enabled = state == Qt.Unchecked
+            self._disable_navbar_cursors_checkbox.setChecked(not enabled)
+            self._disable_navbar_cursors_checkbox.setEnabled(enabled)
+            self._disable_funcs_cursors_checkbox.setChecked(not enabled)
+            self._disable_funcs_cursors_checkbox.setEnabled(enabled)
+            self._disable_disasm_cursors_checkbox.setChecked(not enabled)
+            self._disable_disasm_cursors_checkbox.setEnabled(enabled)
+
+        self._disable_all_cursors_checkbox.stateChanged.connect(state_changed)
+
+        style_sheet = """QCheckBox{ margin-left: 20px; }"""
+
+        text = "Disable navigation bar user cursors"
+        self._disable_navbar_cursors_checkbox = QCheckBox(text)
+        layout.addRow(self._disable_navbar_cursors_checkbox)
+        self._disable_navbar_cursors_checkbox.setChecked(navbar_checked)
+        self._disable_navbar_cursors_checkbox.setEnabled(not all_checked)
+        self._disable_navbar_cursors_checkbox.setStyleSheet(style_sheet)
+
+        text = "Disable functions window user cursors"
+        self._disable_funcs_cursors_checkbox = QCheckBox(text)
+        layout.addRow(self._disable_funcs_cursors_checkbox)
+        self._disable_funcs_cursors_checkbox.setChecked(funcs_checked)
+        self._disable_funcs_cursors_checkbox.setEnabled(not all_checked)
+        self._disable_funcs_cursors_checkbox.setStyleSheet(style_sheet)
+
+        text = "Disable disassembly view user cursors"
+        self._disable_disasm_cursors_checkbox = QCheckBox(text)
+        layout.addRow(self._disable_disasm_cursors_checkbox)
+        self._disable_disasm_cursors_checkbox.setChecked(disasm_checked)
+        self._disable_disasm_cursors_checkbox.setEnabled(not all_checked)
+        self._disable_disasm_cursors_checkbox.setStyleSheet(style_sheet)
 
         text = "Allow other users to send notifications"
         self._notifications_checkbox = QCheckBox(text)
@@ -673,7 +723,7 @@ class SettingsDialog(QDialog):
         item = self._servers_table.selectedItems()[0]
         self._servers[item.row()] = server
 
-        item.set_text("%s:%d" % (server["host"], server["port"]))
+        item.setText("%s:%d" % (server["host"], server["port"]))
         item.setData(Qt.UserRole, server)
         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
 
@@ -689,8 +739,19 @@ class SettingsDialog(QDialog):
         self._name_line_edit.setText(config["user"]["name"])
         self._set_color(ida_color=config["user"]["color"])
 
-        checked = config["user"]["navbar_colorizer"]
-        self._navbar_colorizer_checkbox.setChecked(checked)
+        navbar_checked = not config["cursors"]["navbar"]
+        funcs_checked = not config["cursor"]["funcs"]
+        disasm_checked = not config["cursor"]["disasm"]
+        all_checked = navbar_checked and funcs_checked and disasm_checked
+        self._disable_all_cursors_checkbox.setChecked(all_checked)
+
+        self._disable_navbar_cursors_checkbox.setChecked(navbar_checked)
+        self._disable_navbar_cursors_checkbox.setEnabled(not all_checked)
+        self._disable_funcs_cursors_checkbox.setChecked(funcs_checked)
+        self._disable_funcs_cursors_checkbox.setEnabled(not all_checked)
+        self._disable_disasm_cursors_checkbox.setChecked(disasm_checked)
+        self._disable_disasm_cursors_checkbox.setEnabled(not all_checked)
+
         checked = config["user"]["notifications"]
         self._notifications_checkbox.setChecked(checked)
 
@@ -708,19 +769,25 @@ class SettingsDialog(QDialog):
         name = self._name_line_edit.text()
         if self._plugin.config["user"]["name"] != name:
             old_name = self._plugin.config["user"]["name"]
-            self._plugin.network.send_packet(UserRenamed(old_name, name))
+            self._plugin.network.send_packet(UpdateUserName(old_name, name))
             self._plugin.config["user"]["name"] = name
 
         if self._plugin.config["user"]["color"] != self._color:
             name = self._plugin.config["user"]["name"]
             old_color = self._plugin.config["user"]["color"]
-            packet = UserColorChanged(name, old_color, self._color)
+            packet = UpdateUserColor(name, old_color, self._color)
             self._plugin.network.send_packet(packet)
             self._plugin.config["user"]["color"] = self._color
             self._plugin.interface.widget.refresh()
 
-        checked = self._navbar_colorizer_checkbox.isChecked()
-        self._plugin.config["user"]["navbar_colorizer"] = checked
+        all_ = self._disable_all_cursors_checkbox.isChecked()
+        checked = self._disable_navbar_cursors_checkbox.isChecked()
+        self._plugin.config["cursors"]["navbar"] = not all_ and not checked
+        checked = self._disable_funcs_cursors_checkbox.isChecked()
+        self._plugin.config["cursors"]["funcs"] = not all_ and not checked
+        checked = self._disable_disasm_cursors_checkbox.isChecked()
+        self._plugin.config["cursors"]["disasm"] = not all_ and not checked
+
         checked = self._notifications_checkbox.isChecked()
         self._plugin.config["user"]["notifications"] = checked
 

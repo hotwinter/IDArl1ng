@@ -11,6 +11,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 import colorsys
+from functools import partial
 import time
 
 from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QTimer
@@ -96,17 +97,19 @@ class StatusWidget(QWidget):
         self._timer.timeout.connect(self.refresh)
 
     def install(self, window):
-        self._timer.start()
+        self._plugin.logger.debug("Installing the status bar widget")
         window.statusBar().addPermanentWidget(self)
+        self._timer.start()
         self.refresh()
 
     def uninstall(self, window):
-        self._timer.stop()
+        self._plugin.logger.debug("Uninstalling the status bar widget")
         window.statusBar().removeWidget(self)
+        self._timer.stop()
 
     def refresh(self):
         """Called to update the widget when the network state has changed."""
-        self._plugin.logger.trace("Updating widget state")
+        self._plugin.logger.trace("Refreshing the status bar widget")
 
         # Get the corresponding color, text and icon
         if self._plugin.network.connected:
@@ -148,12 +151,14 @@ class StatusWidget(QWidget):
             most_recent = max(invite.time for invite in invites)
 
         # Get the corresponding icon
-        if most_recent > 0 and time.time() - most_recent < 10.0:
+        if most_recent > 0 and time.time() - most_recent < 60.0:
             icon = "hot.png"
-        elif most_recent > 0 and time.time() - most_recent < 30.0:
+        elif most_recent > 0 and time.time() - most_recent < 300.0:
             icon = "warm.png"
-        else:
+        elif most_recent > 0:
             icon = "cold.png"
+        else:
+            icon = "empty.png"
 
         # Update the text of the invites widgets
         self._invites_text_widget.setText(" | %d " % len(invites))
@@ -172,7 +177,7 @@ class StatusWidget(QWidget):
         )
 
         # Update the text of the users widget
-        users = len(self._plugin.interface.painter.users_positions)
+        users = len(self._plugin.core.get_users())
         self._users_text_widget.setText(" | %d" % users)
         self._users_text_widget.adjustSize()
 
@@ -205,14 +210,18 @@ class StatusWidget(QWidget):
 
     def _context_menu(self, point):
         """Called when the context menu is being requested."""
-        self._plugin.logger.debug("Opening widget context menu")
-        width = 3 + self._servers_text_widget.sizeHint().width()
-        width += 3 + self._servers_icon_widget.sizeHint().width()
+        width_server = 3 + self._servers_text_widget.sizeHint().width()
+        width_server += 3 + self._servers_icon_widget.sizeHint().width()
+        width_invites = width_server
+        width_invites += 3 + self._invites_text_widget.sizeHint().width()
+        width_invites += 3 + self._invites_icon_widget.sizeHint().width()
 
-        if point.x() < width + 3:
+        if point.x() < width_server + 3:
             self._servers_context_menu(point)
-        else:
+        elif width_server < point.x() < width_invites + 3:
             self._invites_context_menu(point)
+        else:
+            self._users_context_menu(point)
 
     def _servers_context_menu(self, point):
         """Populates the server context menu."""
@@ -242,7 +251,7 @@ class StatusWidget(QWidget):
             else:
                 self._plugin.network.stop_server()
 
-        integrated.setChecked(self._plugin.network.server_running())
+        integrated.setChecked(self._plugin.network.started)
         integrated.triggered.connect(integrated_action_triggered)
         menu.addAction(integrated)
 
@@ -253,7 +262,7 @@ class StatusWidget(QWidget):
 
             for server in servers:
                 is_connected = (
-                    self._plugin.network.connected
+                    current_server is not None
                     and server["host"] == current_server["host"]
                     and server["port"] == current_server["port"]
                 )
@@ -269,37 +278,36 @@ class StatusWidget(QWidget):
                 Called when a action is clicked. Connects to the new server
                 or disconnects from the old server.
                 """
-                was_connected = (
-                    self._plugin.network.connected
-                    and self._plugin.network.server == server
-                )
+                server = server_action._server
+                was_connected = self._plugin.network.server == server
                 self._plugin.network.stop_server()
                 self._plugin.network.disconnect()
                 if not was_connected:
-                    self._plugin.network.connect(server_action._server)
+                    self._plugin.network.connect(server)
 
             servers_group.triggered.connect(server_action_triggered)
 
             return servers_group
 
         # Add the discovered servers
-        servers = self._plugin.network.discovery.servers
-        servers = [s for s, t in servers if time.time() - t < 10.0]
+        user_servers = self._plugin.config["servers"]
+        disc_servers = self._plugin.network.discovery.servers
+        disc_servers = [s for s, t in disc_servers if time.time() - t < 10.0]
+        disc_servers = [s for s in disc_servers if s not in user_servers]
         if (
-            self._plugin.network.server_running()
-            and self._plugin.network.server in servers
+            self._plugin.network.started
+            and self._plugin.network.server in disc_servers
         ):
-            servers.remove(self._plugin.network.server)
-        if servers:
+            disc_servers.remove(self._plugin.network.server)
+        if disc_servers:
             menu.addSeparator()
-            servers_group = create_servers_group(servers)
+            servers_group = create_servers_group(disc_servers)
             menu.addActions(servers_group.actions())
 
         # Add the configured servers
-        servers = self._plugin.config["servers"]
-        if self._plugin.config["servers"]:
+        if user_servers:
             menu.addSeparator()
-            servers_group = create_servers_group(servers)
+            servers_group = create_servers_group(user_servers)
             menu.addActions(servers_group.actions())
 
         # Show the context menu
@@ -339,6 +347,44 @@ class StatusWidget(QWidget):
                 menu.addAction(action)
 
         # Show the context menu
+        menu.exec_(self.mapToGlobal(point))
+
+    def _users_context_menu(self, point):
+        """Populate the invites context menu."""
+        menu = QMenu(self)
+
+        template = QImage(self._plugin.plugin_resource("user.png"))
+
+        users = self._plugin.core.get_users()
+        follow_all = QAction("Follow all", menu)
+        pixmap = QPixmap(self._plugin.plugin_resource("users.png"))
+        follow_all.setIcon(QIcon(pixmap))
+        follow_all.setEnabled(bool(users))
+        follow_all.setCheckable(True)
+        follow_all.setChecked(self._plugin.interface.followed == "everyone")
+
+        def follow_triggered(name):
+            interface = self._plugin.interface
+            interface.followed = name if interface.followed != name else None
+
+        follow_all.triggered.connect(partial(follow_triggered, "everyone"))
+        menu.addAction(follow_all)
+        if users:
+            menu.addSeparator()
+
+            # Get all active users
+            for name, user in users.items():
+                is_followed = self._plugin.interface.followed == name
+                text = "Follow %s" % name
+                action = QAction(text, menu)
+                action.setCheckable(True)
+                action.setChecked(is_followed)
+                pixmap = StatusWidget.make_icon(template, user["color"])
+                action.setIcon(QIcon(pixmap))
+
+                action.triggered.connect(partial(follow_triggered, name))
+                menu.addAction(action)
+
         menu.exec_(self.mapToGlobal(point))
 
     def paintEvent(self, event):  # noqa: N802

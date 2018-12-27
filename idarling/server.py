@@ -29,7 +29,7 @@ class DedicatedServer(Server):
     server should be used when the integrated doesn't fulfil the user's needs.
     """
 
-    def __init__(self, ssl, level, parent=None):
+    def __init__(self, level, parent=None):
         # Get the path to the log file
         log_dir = os.path.join(os.path.dirname(__file__), "logs")
         log_dir = os.path.abspath(log_dir)
@@ -38,7 +38,7 @@ class DedicatedServer(Server):
         log_path = os.path.join(log_dir, "idarling.%s.log" % os.getpid())
 
         logger = start_logging(log_path, "IDArling.Server", level)
-        Server.__init__(self, logger, ssl, parent)
+        Server.__init__(self, logger, parent)
 
     def server_file(self, filename):
         """
@@ -56,8 +56,9 @@ def start(args):
     app = QCoreApplication(sys.argv)
     sys.excepthook = traceback.print_exception
 
-    server = DedicatedServer(args.ssl, args.level)
-    server.start(args.host, args.port)
+    server = DedicatedServer(args.level)
+    server.SNAPSHOT_INTERVAL = args.interval
+    server.start(args.host, args.port, args.ssl)
 
     # Allow the use of Ctrl-C to stop the server
     def sigint_handler(_, __):
@@ -127,6 +128,15 @@ def main():
         choices=levels,
         default="INFO",
         help="the log level",
+    )
+
+    # Interval in ticks between database snapshot
+    parser.add_argument(
+        "-i",
+        "--interval",
+        type=int,
+        default=0,
+        help="database snapshot interval",
     )
 
     start(parser.parse_args())

@@ -10,6 +10,7 @@
 
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
+import ctypes
 import sys
 
 import ida_bytes
@@ -23,6 +24,7 @@ import ida_name
 import ida_pro
 import ida_range
 import ida_segment
+import ida_segregs
 import ida_struct
 import ida_typeinf
 import ida_ua
@@ -35,9 +37,9 @@ if sys.version_info > (3,):
 
 class Event(DefaultEvent):
     """
-    This is a common class for events that provides utilities methods to
-    encode/decode string and raw bytes. Events should also implement __call__
-    which is called when it needs to be replayed into IDA.
+    This is a common class for all events that provides utility methods to
+    encode/decode strings and raw bytes. Events should also implement __call__
+    which is called when the event needs to be replayed into IDA.
     """
 
     @staticmethod
@@ -69,7 +71,7 @@ class Event(DefaultEvent):
         return s.decode("raw_unicode_escape")
 
     def __call__(self):
-        """Reproduce the underlying user action into IDA."""
+        """Reproduce the underlying user event into IDA."""
         raise NotImplementedError("__call__() not implemented")
 
 
@@ -112,6 +114,8 @@ class RenamedEvent(Event):
         ida_name.set_name(
             self.ea, Event.encode(self.new_name), flags | ida_name.SN_NOWARN
         )
+        ida_kernwin.request_refresh(ida_kernwin.IWID_DISASMS)
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
 
 class FuncAddedEvent(Event):
@@ -281,57 +285,74 @@ class TiChangedEvent(Event):
 class LocalTypesChangedEvent(Event):
     __event__ = "local_types_changed"
 
-    def __init__(self, local_type):
+    def __init__(self, local_types):
         super(LocalTypesChangedEvent, self).__init__()
-        self.local_type = []
-        if local_type is not None:
-            for t in local_type:
-                if t is not None:
-                    self.local_type.append(
-                        (
-                            t[0],
-                            Event.decode_bytes(t[1]),
-                            Event.decode_bytes(t[2]),
-                            Event.decode_bytes(t[3]),
-                        )
-                    )
-                else:
-                    self.local_type.append(None)
+        self.local_types = []
+        for py_ord, name, type, fields, cmt, fieldcmts, sclass in local_types:
+            name = Event.decode_bytes(name)
+            type = Event.decode_bytes(type)
+            fields = Event.decode_bytes(fields)
+            cmt = Event.decode_bytes(cmt)
+            fieldcmts = Event.decode_bytes(fieldcmts)
+            self.local_types.append(
+                (py_ord, name, type, fields, cmt, fieldcmts, sclass)
+            )
 
     def __call__(self):
-        local_type = []
-        for t in self.local_type:
-            if t is not None:
-                local_type.append(
-                    (
-                        t[0],
-                        Event.encode_bytes(t[1]),
-                        Event.encode_bytes(t[2]),
-                        Event.encode_bytes(t[3]),
-                    )
+        from .core import Core
+
+        dll = Core.get_ida_dll()
+
+        get_idati = dll.get_idati
+        get_idati.argtypes = []
+        get_idati.restype = ctypes.c_void_p
+
+        set_numbered_type = dll.set_numbered_type
+        set_numbered_type.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+        ]
+        set_numbered_type.restype = ctypes.c_int
+
+        py_ti = ida_typeinf.get_idati()
+        ordinal_qty = ida_typeinf.get_ordinal_qty(py_ti) - 1
+        last_ordinal = self.local_types[-1][0]
+        if ordinal_qty < last_ordinal:
+            ida_typeinf.alloc_type_ordinals(py_ti, last_ordinal - ordinal_qty)
+        else:
+            for py_ordinal in range(last_ordinal + 1, ordinal_qty + 1):
+                ida_typeinf.del_numbered_type(py_ti, py_ordinal)
+
+        local_types = self.local_types
+        for py_ord, name, type, fields, cmt, fieldcmts, sclass in local_types:
+            if type:
+                ti = get_idati()
+                ordinal = ctypes.c_uint32(py_ord)
+                ntf_flags = ctypes.c_int(ida_typeinf.NTF_REPLACE)
+                name = ctypes.c_char_p(Event.encode_bytes(name))
+                type = ctypes.c_char_p(Event.encode_bytes(type))
+                fields = ctypes.c_char_p(Event.encode_bytes(fields))
+                cmt = ctypes.c_char_p(Event.encode_bytes(cmt))
+                fieldcmts = ctypes.c_char_p(Event.encode_bytes(fieldcmts))
+                sclass = ctypes.c_int(sclass)
+                set_numbered_type(
+                    ti,
+                    ordinal,
+                    ntf_flags,
+                    name,
+                    type,
+                    fields,
+                    cmt,
+                    fieldcmts,
+                    sclass,
                 )
-            else:
-                local_type.append(None)
-
-        def alloc_oridinal(target_ordinal):
-            # Get_ordinal_qty() will return (current max ordinal + 1)
-            missing_ord = (
-                target_ordinal - ida_typeinf.get_ordinal_qty(None) + 1
-            )
-            if missing_ord > 0:
-                ida_typeinf.alloc_type_ordinals(None, missing_ord)
-
-        for t in local_type:
-            if t is not None:
-                alloc_oridinal(t[0])
-
-                # Can't change some local types if we don't delete them first
-                ida_typeinf.del_numbered_type(None, t[0])
-
-                cur_tinfo = ida_typeinf.tinfo_t()
-                cur_tinfo.deserialize(None, t[1], t[2])
-                cur_tinfo.set_numbered_type(None, t[0], 0, t[3])
-                ida_typeinf.import_type(None, -1, t[-1])
 
         ida_kernwin.request_refresh(ida_kernwin.IWID_LOCTYPS)
 
@@ -781,6 +802,21 @@ class SegmAttrsUpdatedEvent(Event):
         s.update()
 
 
+class SegmMoved(Event):
+    __event__ = "segm_moved_event"
+
+    def __init__(self, from_ea, to_ea, changed_netmap):
+        super(SegmMoved, self).__init__()
+        self.from_ea = from_ea
+        self.to_ea = to_ea
+        self.changed_netmap = changed_netmap
+
+    def __call__(self):
+        flags = ida_segment.MFS_NETMAP if self.changed_netmap else 0
+        s = ida_segment.getseg(self.from_ea)
+        ida_segment.move_segm(s, self.to_ea, flags)
+
+
 class UndefinedEvent(Event):
     __event__ = "undefined"
 
@@ -804,16 +840,97 @@ class BytePatchedEvent(Event):
         ida_bytes.patch_byte(self.ea, self.value)
 
 
+class SgrChanged(Event):
+    __event__ = "sgr_changed"
+
+    @staticmethod
+    def get_sreg_ranges(rg):
+        sreg_ranges = []
+        sreg_ranges_qty = ida_segregs.get_sreg_ranges_qty(rg)
+        for n in range(sreg_ranges_qty):
+            sreg_range = ida_segregs.sreg_range_t()
+            ida_segregs.getn_sreg_range(sreg_range, rg, n)
+            sreg_ranges.append(
+                (
+                    sreg_range.start_ea,
+                    sreg_range.end_ea,
+                    sreg_range.val,
+                    sreg_range.tag,
+                )
+            )
+        return sreg_ranges
+
+    def __init__(self, rg, sreg_ranges):
+        super(SgrChanged, self).__init__()
+        self.rg = rg
+        self.sreg_ranges = sreg_ranges
+
+    def __call__(self):
+        new_ranges = {r[0]: r for r in self.sreg_ranges}
+        old_ranges = {r[0]: r for r in SgrChanged.get_sreg_ranges(self.rg)}
+
+        start_eas = sorted(
+            set(list(new_ranges.keys()) + list(old_ranges.keys()))
+        )
+        for start_ea in start_eas:
+            new_range = new_ranges.get(start_ea, None)
+            old_range = old_ranges.get(start_ea, None)
+
+            if new_range and not old_range:
+                _, __, val, tag = new_range
+                ida_segregs.split_sreg_range(start_ea, self.rg, val, tag, True)
+
+            if not new_range and old_range:
+                ida_segregs.del_sreg_range(start_ea, self.rg)
+
+            if new_range and old_range:
+                _, __, new_val, new_tag = new_range
+                _, __, old_val, old_tag = old_range
+                if new_val != old_val or new_tag != old_tag:
+                    ida_segregs.split_sreg_range(
+                        start_ea, self.rg, new_val, new_tag, True
+                    )
+
+        ida_kernwin.request_refresh(ida_kernwin.IWID_SEGREGS)
+
+
+# class GenRegvarDefEvent(Event):
+#    __event__ = "gen_regvar_def"
+#
+#    def __init__(self, ea, canonical_name, new_name, cmt):
+#        super(GenRegvarDefEvent, self).__init__()
+#        self.ea = ea
+#        self.canonical_name = Event.decode(canonical_name)
+#        self.new_name = Event.decode(new_name)
+#        self.cmt = Event.decode(cmt)
+#
+#    def __call__(self):
+#        func = ida_funcs.get_func(self.ea)
+#        ida_frame.add_regvar(
+#            func,
+#            func.start_ea,
+#            func.end_ea,
+#            Event.encode(self.canonical_name),
+#            Event.encode(self.new_name),
+#            Event.encode(self.cmt),
+#        )
+
+
 class HexRaysEvent(Event):
     @staticmethod
-    def refresh_pseudocode_view():
+    def refresh_pseudocode_view(ea):
         """Refreshes the pseudocode view in IDA."""
         names = ["Pseudocode-%c" % chr(ord("A") + i) for i in range(5)]
         for name in names:
             widget = ida_kernwin.find_widget(name)
             if widget:
                 vu = ida_hexrays.get_widget_vdui(widget)
-                vu.refresh_view(True)
+
+                # Check if the address is in the same function
+                func_ea = vu.cfunc.entry_ea
+                func = ida_funcs.get_func(func_ea)
+                if ida_funcs.func_contains(func, ea):
+                    vu.refresh_view(True)
 
 
 class UserLabelsEvent(HexRaysEvent):
@@ -830,7 +947,7 @@ class UserLabelsEvent(HexRaysEvent):
             name = Event.encode(name)
             ida_hexrays.user_labels_insert(labels, org_label, name)
         ida_hexrays.save_user_labels(self.ea, labels)
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
 
 class UserCmtsEvent(HexRaysEvent):
@@ -849,7 +966,7 @@ class UserCmtsEvent(HexRaysEvent):
             tl.itp = tl_itp
             cmts.insert(tl, ida_hexrays.citem_cmt_t(Event.encode(cmt)))
         ida_hexrays.save_user_cmts(self.ea, cmts)
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
 
 class UserIflagsEvent(HexRaysEvent):
@@ -869,14 +986,14 @@ class UserIflagsEvent(HexRaysEvent):
         # ida_hexrays.save_user_iflags(self.ea, iflags)
 
         ida_hexrays.save_user_iflags(self.ea, ida_hexrays.user_iflags_new())
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
         cfunc = ida_hexrays.decompile(self.ea)
         for (cl_ea, cl_op), f in self.iflags:
             cl = ida_hexrays.citem_locator_t(cl_ea, cl_op)
             cfunc.set_user_iflags(cl, f)
         cfunc.save_user_iflags()
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
 
 class UserLvarSettingsEvent(HexRaysEvent):
@@ -906,7 +1023,7 @@ class UserLvarSettingsEvent(HexRaysEvent):
         lvinf.stkoff_delta = self.lvar_settings["stkoff_delta"]
         lvinf.ulv_flags = self.lvar_settings["ulv_flags"]
         ida_hexrays.save_user_lvar_settings(self.ea, lvinf)
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)
 
     @staticmethod
     def _get_lvar_saved_info(dct):
@@ -980,4 +1097,4 @@ class UserNumformsEvent(HexRaysEvent):
             nf.type_name = Event.encode(_nf["type_name"])
             ida_hexrays.user_numforms_insert(numforms, ol, nf)
         ida_hexrays.save_user_numforms(self.ea, numforms)
-        HexRaysEvent.refresh_pseudocode_view()
+        HexRaysEvent.refresh_pseudocode_view(self.ea)

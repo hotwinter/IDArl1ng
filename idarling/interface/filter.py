@@ -10,9 +10,10 @@
 
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
+import ida_funcs
 import ida_kernwin
 
-from PyQt5.QtCore import QObject, Qt  # noqa: I202
+from PyQt5.QtCore import QEvent, QObject, Qt  # noqa: I202
 from PyQt5.QtGui import QContextMenuEvent, QIcon, QImage, QPixmap, QShowEvent
 from PyQt5.QtWidgets import (
     QAction,
@@ -21,11 +22,12 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QLabel,
     QMenu,
+    QTableView,
     QWidget,
 )
 
 from .widget import StatusWidget
-from ..shared.commands import InviteTo
+from ..shared.commands import InviteToLocation
 
 
 class EventFilter(QObject):
@@ -37,15 +39,17 @@ class EventFilter(QObject):
     def __init__(self, plugin, parent=None):
         super(EventFilter, self).__init__(parent)
         self._plugin = plugin
-        self._augment = False
+        self._intercept = False
 
     def install(self):
+        self._plugin.logger.debug("Installing the event filter")
         qApp.instance().installEventFilter(self)
 
     def uninstall(self):
+        self._plugin.logger.debug("Uninstalling the event filter")
         qApp.instance().removeEventFilter(self)
 
-    def replace_icon(self, label):
+    def _replace_icon(self, label):
         pixmap = QPixmap(self._plugin.plugin_resource("idarling.png"))
         pixmap = pixmap.scaled(
             label.sizeHint().width(),
@@ -55,90 +59,124 @@ class EventFilter(QObject):
         )
         label.setPixmap(pixmap)
 
-    def eventFilter(self, obj, ev):  # noqa: N802
-        # We're looking for a QShowEvent being triggered on a QDialog
-        # having the title "Dialog"
-        if (
-            isinstance(obj, QDialog)
-            and isinstance(ev, QShowEvent)
-            and obj.windowTitle() == "About"
-        ):
-            # Look for a QGroupBox
-            for child in obj.children():
-                if isinstance(child, QGroupBox):
-                    # Look for a QLabel with an icon
-                    for subchild in child.children():
-                        if isinstance(subchild, QLabel) and subchild.pixmap():
-                            self.replace_icon(subchild)
+    def _insert_menu(self, obj):
+        # Find where to install our submenu
+        sep = None
+        for act in obj.actions():
+            if act.isSeparator():
+                sep = act
+            if "Undefine" in act.text():
+                break
+        obj.insertSeparator(sep)
 
-        # We're looking for a QContextMenuEvent on a QWidget
+        # Setup our custom menu text and icon
+        menu = QMenu("Invite to location", obj)
+        pixmap = QPixmap(self._plugin.plugin_resource("invite.png"))
+        menu.setIcon(QIcon(pixmap))
+
+        # Setup our first submenu entry text and icon
+        everyone = QAction("Everyone", menu)
+        pixmap = QPixmap(self._plugin.plugin_resource("users.png"))
+        everyone.setIcon(QIcon(pixmap))
+
+        def invite_to(name):
+            """Send an invitation to the current location."""
+            loc = ida_kernwin.get_screen_ea()
+            packet = InviteToLocation(name, loc)
+            self._plugin.network.send_packet(packet)
+
+        # Handler for when the action is clicked
+        def invite_to_everyone():
+            invite_to("everyone")
+
+        everyone.triggered.connect(invite_to_everyone)
+        menu.addAction(everyone)
+
+        menu.addSeparator()
+        template = QImage(self._plugin.plugin_resource("user.png"))
+
+        def create_action(name, color):
+            action = QAction(name, menu)
+            pixmap = StatusWidget.make_icon(template, color)
+            action.setIcon(QIcon(pixmap))
+
+            # Handler for when the action is clicked
+            def invite_to_user():
+                invite_to(name)
+
+            action.triggered.connect(invite_to_user)
+            return action
+
+        # Insert an action for each connected user
+        for name, user in self._plugin.core.get_users().items():
+            menu.addAction(create_action(name, user["color"]))
+        obj.insertMenu(sep, menu)
+
+    def _set_tooltip(self, obj, ev):
+        cursors = self._plugin.config["cursors"]
+        if not cursors["funcs"]:
+            return
+
+        obj.setToolTip("")
+        index = obj.parent().indexAt(ev.pos())
+        func_ea = int(index.sibling(index.row(), 2).data(), 16)
+        func = ida_funcs.get_func(func_ea)
+
+        # Find the corresponding username
+        for name, user in self._plugin.core.get_users().items():
+            if ida_funcs.func_contains(func, user["ea"]):
+                # Set the tooltip
+                obj.setToolTip(name)
+                break
+
+    def eventFilter(self, obj, ev):  # noqa: N802
+        # Is it a QShowEvent on a QDialog named "Dialog"?
+        if (
+            ev.__class__ == ev,
+            QShowEvent
+            and obj.__class__ == QDialog
+            and obj.windowTitle() == "About",
+        ):
+            # Find a child QGroupBox
+            for groupBox in obj.children():
+                if groupBox.__class__ == QGroupBox:
+                    # Find a child QLabel with an icon
+                    for label in groupBox.children():
+                        if isinstance(label, QLabel) and label.pixmap():
+                            self._replace_icon(label)
+
+        # Is it a QContextMenuEvent on a QWidget?
         if isinstance(obj, QWidget) and isinstance(ev, QContextMenuEvent):
-            # Look for a parent object named "IDA View"
+            # Find a parent titled "IDA View"
             parent = obj
             while parent:
                 if parent.windowTitle().startswith("IDA View"):
                     # Intercept the next context menu
-                    self._augment = True
+                    self._intercept = True
                 parent = parent.parent()
 
-        # We're looking for a QShowEvent on a QMenu
+        # Is it a QShowEvent on a QMenu?
         if isinstance(obj, QMenu) and isinstance(ev, QShowEvent):
-            # Is it the disassembler context menu?
-            if self._augment:
-                # Find where to install our submenu
-                sep = 0
-                for act in obj.actions():
-                    if act.isSeparator():
-                        sep = act
-                    if "Undefine" in act.text():
-                        break
-                obj.insertSeparator(sep)
+            # Should we intercept?
+            if self._intercept:
+                self._insert_menu(obj)
+                self._intercept = False
 
-                # Setup our custom menu text and icon
-                menu = QMenu("Invite to location", obj)
-                pixmap = QPixmap(self._plugin.plugin_resource("invite.png"))
-                menu.setIcon(QIcon(pixmap))
+        # Is it a ToolTip event on a QWidget with a parent?
+        if (
+            ev.type() == QEvent.ToolTip
+            and obj.__class__ == QWidget
+            and obj.parent()
+        ):
+            table_view = obj.parent()
+            # Is it a QTableView with a parent?
+            if table_view.__class__ == QTableView and table_view.parent():
+                func_window = table_view.parent()
+                # Is it a QWidget titled "Functions window"?
+                if (
+                    func_window.__class__ == QWidget
+                    and func_window.windowTitle() == "Functions window"
+                ):
+                    self._set_tooltip(obj, ev)
 
-                # Setup our first submenu entry text and icon
-                everyone = QAction("Everyone", menu)
-                pixmap = QPixmap(self._plugin.plugin_resource("users.png"))
-                everyone.setIcon(QIcon(pixmap))
-
-                def invite_to(name):
-                    """
-                    Send an invitation to the current location within
-                    the disassembler view to the specified user.
-                    """
-                    loc = ida_kernwin.get_screen_ea()
-                    packet = InviteTo(name, loc)
-                    self._plugin.network.send_packet(packet)
-
-                # Handler for when the action is clicked
-                def invite_to_everyone():
-                    invite_to("everyone")
-
-                everyone.triggered.connect(invite_to_everyone)
-                menu.addAction(everyone)
-
-                menu.addSeparator()
-                template = QImage(self._plugin.plugin_resource("user.png"))
-
-                def create_action(name, color):
-                    action = QAction(name, menu)
-                    pixmap = StatusWidget.make_icon(template, color)
-                    action.setIcon(QIcon(pixmap))
-
-                    # Handler for when the action is clicked
-                    def invite_to_user():
-                        invite_to(name)
-
-                    action.triggered.connect(invite_to_user)
-                    return action
-
-                # Insert an action for each connected user
-                painter = self._plugin.interface.painter
-                for name, info in painter.users_positions.items():
-                    menu.addAction(create_action(name, info["color"]))
-                obj.insertMenu(sep, menu)
-                self._augment = False
         return False
