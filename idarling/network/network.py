@@ -86,7 +86,7 @@ class Network(Module):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
         # Wrap the socket in a SSL tunnel
         if not no_ssl:
-            ctx = ssl.create_default_context()
+            ctx = ssl._create_unverified_context()
             sock = ctx.wrap_socket(
                 sock, server_hostname=host, do_handshake_on_connect=False
             )
